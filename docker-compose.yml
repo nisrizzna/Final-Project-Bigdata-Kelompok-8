@@ -1,0 +1,263 @@
+
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║  Big Data Pipeline — Kurs USD vs Harga Pangan Indonesia         ║
+# ║  Services: Kafka (KRaft) · Hadoop HDFS · Spark · Flask          ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+networks:
+  pangan-net:
+    driver: bridge
+
+services:
+
+  # ════════════════════════════════════════════════════════
+  # APACHE KAFKA (KRaft mode — via Confluent Platform)
+  # ════════════════════════════════════════════════════════
+  kafka:
+    image: confluentinc/cp-kafka:7.6.1
+    container_name: kafka_pangan
+    hostname: kafka
+    networks:
+      - pangan-net
+    ports:
+      - "9092:9092"
+    environment:
+      TZ: "Asia/Jakarta"
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: broker,controller
+      KAFKA_CONTROLLER_QUORUM_VOTERS: 1@kafka:9093
+      KAFKA_LISTENERS: PLAINTEXT_INTERNAL://0.0.0.0:29092,PLAINTEXT_EXTERNAL://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT_INTERNAL://kafka:29092,PLAINTEXT_EXTERNAL://localhost:9092
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: PLAINTEXT_INTERNAL:PLAINTEXT,PLAINTEXT_EXTERNAL:PLAINTEXT,CONTROLLER:PLAINTEXT
+      KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT_INTERNAL
+      KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: "true"
+      KAFKA_LOG_RETENTION_HOURS: 168
+      KAFKA_MESSAGE_MAX_BYTES: 10485760
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR: 1
+      KAFKA_TRANSACTION_STATE_LOG_MIN_ISR: 1
+      CLUSTER_ID: MkU3OEVBNTcwNTJENDM2Qk
+    volumes:
+      - kafka_data:/var/lib/kafka/data
+    healthcheck:
+      test: ["CMD", "kafka-topics", "--bootstrap-server", "localhost:9092", "--list"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════
+  # HADOOP HDFS — NameNode
+  # UI: http://localhost:9870
+  # ════════════════════════════════════════════════════════
+  namenode:
+    image: bde2020/hadoop-namenode:2.0.0-hadoop3.2.1-java8
+    container_name: namenode_pangan
+    hostname: namenode
+    networks:
+      - pangan-net
+    ports:
+      - "19870:9870"
+      - "8020:8020"
+    environment:
+      TZ: "Asia/Jakarta"
+      CLUSTER_NAME: pangan-bigdata
+    env_file:
+      - hadoop.env
+    volumes:
+      - namenode_data:/hadoop/dfs/name
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:9870/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════
+  # HADOOP HDFS — DataNode
+  # ════════════════════════════════════════════════════════
+  datanode:
+    image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
+    container_name: datanode_pangan
+    hostname: datanode
+    networks:
+      - pangan-net
+    depends_on:
+      namenode:
+        condition: service_healthy
+    env_file:
+      - hadoop.env
+    environment:
+      TZ: "Asia/Jakarta"
+    volumes:
+      - datanode_data:/hadoop/dfs/data
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════
+  # HADOOP ResourceManager (YARN)
+  # UI: http://localhost:8088
+  # ════════════════════════════════════════════════════════
+  resourcemanager:
+    image: bde2020/hadoop-resourcemanager:2.0.0-hadoop3.2.1-java8
+    container_name: resourcemanager_pangan
+    hostname: resourcemanager
+    networks:
+      - pangan-net
+    ports:
+      - "8088:8088"
+    env_file:
+      - hadoop.env
+    environment:
+      TZ: "Asia/Jakarta"
+    depends_on:
+      namenode:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════
+  # APACHE SPARK Master
+  # UI: http://localhost:8080
+  # ════════════════════════════════════════════════════════
+  spark-master:
+    image: apache/spark:3.5.0
+    container_name: spark_master_pangan
+    user: root
+    hostname: spark-master
+    networks:
+      - pangan-net
+    ports:
+      - "8080:8080"
+      - "7077:7077"
+      - "4040:4040"
+    environment:
+      TZ: "Asia/Jakarta"
+      SPARK_NO_DAEMONIZE: "true"
+    command: ["/bin/bash", "/spark-apps/spark_entrypoint.sh"]
+    volumes:
+      - ./spark:/spark-apps
+      - ./dashboard/data:/data/output
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════
+  # APACHE SPARK Worker
+  # ════════════════════════════════════════════════════════
+  spark-worker:
+    image: apache/spark:3.5.0
+    container_name: spark_worker_pangan
+    user: root
+    hostname: spark-worker
+    networks:
+      - pangan-net
+    depends_on:
+      - spark-master
+    environment:
+      TZ: "Asia/Jakarta"
+      SPARK_NO_DAEMONIZE: "true"
+      SPARK_WORKER_MEMORY: 2g
+      SPARK_WORKER_CORES: 2
+    command: ["/bin/bash", "/spark-apps/spark_worker_entrypoint.sh"]
+    volumes:
+      - ./spark:/spark-apps
+      - ./dashboard/data:/data/output
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════
+  # FLASK DASHBOARD
+  # UI: http://localhost:5000
+  # ════════════════════════════════════════════════════════
+  flask:
+    build:
+      context: ./dashboard
+      dockerfile: Dockerfile
+    container_name: flask_pangan
+    hostname: flask
+    networks:
+      - pangan-net
+    ports:
+      - "5002:5000"
+    volumes:
+      - ./dashboard:/app
+    environment:
+      TZ: "Asia/Jakarta"
+      KAFKA_BOOTSTRAP: kafka:29092
+      HDFS_URL: http://namenode:9870/webhdfs/v1
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════
+  # KAFKA CONSUMER TO HDFS
+  # ════════════════════════════════════════════════════════
+  consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    container_name: consumer_pangan
+    hostname: consumer
+    networks:
+      - pangan-net
+    volumes:
+      - .:/app
+    environment:
+      TZ: "Asia/Jakarta"
+      KAFKA_BOOTSTRAP: kafka:29092
+      HDFS_URL: http://namenode:9870/webhdfs/v1
+    depends_on:
+      kafka:
+        condition: service_healthy
+      namenode:
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════
+  # KAFKA PRODUCER FOR PRICES & KURS
+  # ════════════════════════════════════════════════════════
+  producer-api:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    container_name: producer_api_pangan
+    hostname: producer-api
+    networks:
+      - pangan-net
+    volumes:
+      - .:/app
+    environment:
+      TZ: "Asia/Jakarta"
+      KAFKA_BOOTSTRAP: kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: ["python", "kafka/producer_api.py"]
+    restart: unless-stopped
+
+  # ════════════════════════════════════════════════════════
+  # KAFKA PRODUCER FOR ECONOMIC NEWS (RSS)
+  # ════════════════════════════════════════════════════════
+  producer-rss:
+    build:
+      context: .
+      dockerfile: Dockerfile.consumer
+    container_name: producer_rss_pangan
+    hostname: producer-rss
+    networks:
+      - pangan-net
+    volumes:
+      - .:/app
+    environment:
+      TZ: "Asia/Jakarta"
+      KAFKA_BOOTSTRAP: kafka:29092
+    depends_on:
+      kafka:
+        condition: service_healthy
+    command: ["python", "kafka/producer_rss.py"]
+    restart: unless-stopped
+
+volumes:
+  kafka_data:
+  namenode_data:
+  datanode_data:

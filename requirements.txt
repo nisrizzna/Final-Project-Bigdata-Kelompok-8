@@ -1,0 +1,23 @@
+kafka-python-ng
+
+# ── Data fetch real-time ────────────────────────────────
+yfinance>=0.2.28          # kurs USD/IDR real-time
+requests>=2.31.0
+beautifulsoup4>=4.12.0    # scraping PIHPS
+feedparser>=6.0.10        # RSS berita ekonomi
+lxml>=4.9.0               # HTML parser cepat
+
+# ── Data processing ─────────────────────────────────────
+pandas>=2.0.0
+numpy>=1.24.0
+
+# ── Spark (PySpark) ────────────────────────────────────
+pyspark==3.5.0
+
+# ── Dashboard ──────────────────────────────────────────
+flask>=3.0.0
+flask-cors>=4.0.0
+
+# ── Utils ───────────────────────────────────────────────
+python-dotenv>=1.0.0
+schedule>=1.2.0

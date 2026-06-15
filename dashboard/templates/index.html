@@ -1,0 +1,680 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <meta name="description" content="Dashboard real-time analisis dampak kurs USD/IDR terhadap harga 11 komoditas pangan strategis Indonesia menggunakan Apache Kafka, Hadoop HDFS, dan Apache Spark."/>
+  <title>Big Data Analytics — Kurs &amp; Harga Pangan Indonesia</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+  <style>
+    :root {
+      --bg:       #0d1117;
+      --card:     #161b22;
+      --card2:    #1c2128;
+      --border:   #30363d;
+      --text:     #e6edf3;
+      --muted:    #7d8590;
+      --accent:   #58a6ff;
+      --green:    #3fb950;
+      --red:      #f85149;
+      --yellow:   #d29922;
+      --purple:   #bc8cff;
+      --orange:   #ffa657;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Inter', 'Segoe UI', sans-serif;
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    /* ── Header ── */
+    .header {
+      background: linear-gradient(135deg, #161b22 0%, #0d1117 100%);
+      border-bottom: 1px solid var(--border);
+      padding: 16px 24px;
+      display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 12px;
+    }
+    .header-left h1 {
+      font-size: 18px; font-weight: 700; color: #fff; line-height: 1.3;
+    }
+    .header-left h1 span { color: var(--accent); }
+    .header-sub { font-size: 11px; color: var(--muted); margin-top: 2px; letter-spacing: .3px; }
+    .header-right { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .live-pill {
+      display: flex; align-items: center; gap: 6px;
+      background: rgba(63,185,80,.12); border: 1px solid rgba(63,185,80,.3);
+      border-radius: 20px; padding: 5px 12px; font-size: 12px; font-weight: 500; color: var(--green);
+    }
+    .live-dot {
+      width: 7px; height: 7px; background: var(--green);
+      border-radius: 50%; animation: blink 1.4s ease-in-out infinite;
+    }
+    @keyframes blink { 0%,100% { opacity: 1; } 50% { opacity: .25; } }
+    .last-update { font-size: 11px; color: var(--muted); }
+
+    /* ── Kurs Bar ── */
+    .kurs-bar {
+      background: linear-gradient(90deg, #161b22, #1c2128);
+      border-bottom: 1px solid var(--border);
+      padding: 12px 24px;
+      display: flex; align-items: center; gap: 28px; flex-wrap: wrap;
+    }
+    .kurs-group { display: flex; flex-direction: column; gap: 2px; }
+    .kurs-label { font-size: 10px; color: var(--muted); font-weight: 500; letter-spacing: .5px; text-transform: uppercase; }
+    .kurs-main { font-size: 26px; font-weight: 700; color: var(--red); letter-spacing: -.5px; }
+    .kurs-badges { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .badge {
+      border-radius: 5px; padding: 3px 9px; font-size: 11px; font-weight: 500;
+    }
+    .badge-merah  { background: rgba(248,81,73,.15); color: var(--red); border: 1px solid rgba(248,81,73,.3); }
+    .badge-rekor  { background: rgba(210,153,34,.15); color: var(--yellow); border: 1px solid rgba(210,153,34,.3); }
+    .badge-sumber { background: rgba(88,166,255,.1); color: var(--accent); font-size: 10px; }
+
+    /* ── Layout ── */
+    .main { padding: 20px 24px; display: flex; flex-direction: column; gap: 20px; }
+    .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(480px, 1fr)); gap: 20px; }
+    .grid-3 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+
+    /* ── Card ── */
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      overflow: hidden;
+      transition: border-color .2s;
+    }
+    .card:hover { border-color: #484f58; }
+    .card-head {
+      padding: 14px 18px;
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .card-title {
+      font-size: 13px; font-weight: 600; color: #fff;
+      display: flex; align-items: center; gap: 8px;
+    }
+    .card-badge {
+      font-size: 10px; border-radius: 4px; padding: 2px 8px; font-weight: 500;
+    }
+    .badge-blue   { background: rgba(88,166,255,.12); color: var(--accent); border: 1px solid rgba(88,166,255,.25); }
+    .badge-green  { background: rgba(63,185,80,.12);  color: var(--green); border: 1px solid rgba(63,185,80,.25); }
+    .badge-purple { background: rgba(188,140,255,.12); color: var(--purple); border: 1px solid rgba(188,140,255,.25); }
+    .badge-yellow { background: rgba(210,153,34,.12); color: var(--yellow); border: 1px solid rgba(210,153,34,.25); }
+    .card-body { padding: 16px 18px; }
+
+    /* ── Harga Grid ── */
+    .harga-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(170px, 1fr));
+      gap: 10px;
+    }
+    .harga-item {
+      background: rgba(255,255,255,.03);
+      border: 1px solid var(--border);
+      border-radius: 8px; padding: 12px;
+      transition: border-color .2s, background .2s;
+      cursor: default;
+    }
+    .harga-item:hover { border-color: var(--accent); background: rgba(88,166,255,.05); }
+    .harga-nama { font-size: 11px; color: var(--muted); margin-bottom: 5px; font-weight: 500; }
+    .harga-nilai { font-size: 18px; font-weight: 700; color: #fff; letter-spacing: -.3px; }
+    .harga-satuan { font-size: 10px; color: var(--muted); }
+    .harga-dampak { font-size: 11px; margin-top: 5px; font-weight: 500; }
+    .up   { color: var(--red); }
+    .down { color: var(--green); }
+    .harga-time { font-size: 10px; color: var(--muted); margin-top: 3px; }
+
+    /* ── Tabel ── */
+    table { width: 100%; border-collapse: collapse; }
+    th {
+      font-size: 11px; color: var(--muted); padding: 8px 10px;
+      text-align: left; border-bottom: 1px solid var(--border);
+      font-weight: 500; text-transform: uppercase; letter-spacing: .3px;
+    }
+    td { padding: 9px 10px; font-size: 13px; border-bottom: 1px solid rgba(255,255,255,.04); }
+    tr:last-child td { border-bottom: none; }
+    tr:hover td { background: rgba(255,255,255,.025); }
+    .bar-wrap { display: flex; align-items: center; gap: 8px; }
+    .bar { height: 5px; border-radius: 3px; background: var(--accent); min-width: 3px; transition: width .3s; }
+
+    /* ── Berita ── */
+    .berita-item { padding: 11px 0; border-bottom: 1px solid rgba(255,255,255,.05); }
+    .berita-item:last-child { border-bottom: none; }
+    .berita-judul { font-size: 13px; color: var(--text); margin-bottom: 5px; line-height: 1.4; }
+    .berita-judul a { color: inherit; text-decoration: none; transition: color .15s; }
+    .berita-judul a:hover { color: var(--accent); }
+    .berita-meta { display: flex; gap: 7px; flex-wrap: wrap; align-items: center; }
+    .tag-sumber { font-size: 10px; color: var(--muted); }
+    .tag-relevan {
+      font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 500;
+      background: rgba(88,166,255,.12); color: var(--accent);
+    }
+    .tag-kurs {
+      font-size: 10px; padding: 1px 6px; border-radius: 3px; font-weight: 500;
+      background: rgba(210,153,34,.12); color: var(--yellow);
+    }
+
+    /* ── Heatmap ── */
+    .heatmap-wrap { overflow-x: auto; }
+    .heatmap-table { border-collapse: collapse; font-size: 10px; margin: 0 auto; }
+    .heatmap-table th {
+      font-size: 9px; color: var(--muted); padding: 4px 6px;
+      text-align: center; max-width: 60px; overflow: hidden;
+      text-transform: none; letter-spacing: 0;
+    }
+    .heatmap-table td {
+      width: 42px; height: 32px; text-align: center; font-size: 10px;
+      border: 1px solid var(--bg); border-radius: 2px; font-weight: 500;
+      transition: opacity .15s;
+    }
+    .heatmap-table td:hover { opacity: .8; }
+
+    /* ── Subsidi ── */
+    .subsidi-summary {
+      display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-bottom: 18px;
+    }
+    .stat-box {
+      background: rgba(255,255,255,.03); border: 1px solid var(--border);
+      border-radius: 8px; padding: 14px; text-align: center;
+    }
+    .stat-val { font-size: 20px; font-weight: 700; color: var(--accent); letter-spacing: -.3px; }
+    .stat-lbl { font-size: 11px; color: var(--muted); margin-top: 4px; }
+
+    /* ── Prediksi ── */
+    .pred-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(195px, 1fr)); gap: 10px; }
+    .pred-item {
+      background: rgba(255,255,255,.03); border: 1px solid var(--border);
+      border-radius: 8px; padding: 13px;
+      transition: border-color .2s;
+    }
+    .pred-item:hover { border-color: var(--accent); }
+    .pred-nama { font-size: 11px; color: var(--muted); margin-bottom: 5px; font-weight: 500; }
+    .pred-r2 { font-size: 11px; color: var(--green); margin-bottom: 8px; }
+    .pred-rows { display: flex; flex-direction: column; gap: 4px; }
+    .pred-row { display: flex; justify-content: space-between; font-size: 12px; }
+    .pred-kurs { color: var(--muted); }
+    .pred-harga { color: #fff; font-weight: 600; }
+
+    /* ── Footer ── */
+    .footer {
+      text-align: center; padding: 20px; color: var(--muted);
+      font-size: 11px; border-top: 1px solid var(--border);
+      margin-top: 8px;
+    }
+
+    /* ── Loading ── */
+    .loading { color: var(--muted); text-align: center; padding: 32px; font-size: 13px; }
+
+    canvas { max-height: 280px; }
+
+    /* ── Scrollbar ── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: var(--bg); }
+    ::-webkit-scrollbar-thumb { background: #30363d; border-radius: 3px; }
+  </style>
+</head>
+<body>
+
+<!-- HEADER -->
+<header class="header">
+  <div class="header-left">
+    <h1>Big Data Analytics — <span>Dampak Kurs Dollar</span> terhadap Harga Pangan</h1>
+    <div class="header-sub">
+      Apache Kafka · Hadoop HDFS · Apache Spark · Flask · Real-Time Dashboard
+    </div>
+  </div>
+  <div class="header-right">
+    <span class="last-update" id="last-update">Memuat data...</span>
+    <div class="live-pill"><span class="live-dot"></span> LIVE</div>
+  </div>
+</header>
+
+<!-- KURS BAR -->
+<div class="kurs-bar">
+  <div class="kurs-group">
+    <div class="kurs-label">USD / IDR Real-Time</div>
+    <div class="kurs-main" id="kurs-nilai">Rp–</div>
+  </div>
+  <div class="kurs-badges">
+    <span class="badge badge-merah" id="kurs-change">–</span>
+    <span class="badge badge-rekor">⚠ Rekor: Rp18.209 (9 Jun 2026)</span>
+    <span class="badge badge-sumber" id="kurs-sumber">Sumber: yfinance USDIDR=X</span>
+  </div>
+</div>
+
+<!-- MAIN -->
+<main class="main">
+
+  <!-- ROW 1: Harga Live -->
+  <div class="card">
+    <div class="card-head">
+      <div class="card-title">🛒 Harga Pangan Terkini — 11 Komoditas Strategis Nasional</div>
+      <span class="card-badge badge-green">Real-Time</span>
+    </div>
+    <div class="card-body">
+      <div class="harga-grid" id="harga-grid">
+        <div class="loading">Menunggu data dari producer...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ROW 2: Chart Korelasi + Volatilitas -->
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title">📈 Korelasi Kurs USD/IDR vs Harga Pangan</div>
+        <span class="card-badge badge-blue">Spark Analysis</span>
+      </div>
+      <div class="card-body">
+        <canvas id="chart-korelasi"></canvas>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title">📊 Indeks Volatilitas Harga per Komoditas</div>
+        <span class="card-badge badge-blue">Spark Analysis</span>
+      </div>
+      <div class="card-body">
+        <canvas id="chart-volatilitas"></canvas>
+      </div>
+    </div>
+  </div>
+
+  <!-- ROW 3: Heatmap + Berita -->
+  <div class="grid-2">
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title">🔥 Heatmap Korelasi Antar Komoditas</div>
+        <span class="card-badge badge-purple">Fitur Unggulan</span>
+      </div>
+      <div class="card-body">
+        <div class="heatmap-wrap" id="heatmap-container">
+          <div class="loading">Menunggu hasil Spark...</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <div class="card-title">📰 Berita Ekonomi Terbaru</div>
+        <span class="card-badge badge-green">RSS Real-Time</span>
+      </div>
+      <div class="card-body" id="berita-list">
+        <div class="loading">Menunggu data RSS...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ROW 4: Prediksi MLlib -->
+  <div class="card">
+    <div class="card-head">
+      <div class="card-title">🤖 Prediksi Harga Berbasis Kurs — Spark MLlib</div>
+      <span class="card-badge badge-blue">LinearRegression</span>
+    </div>
+    <div class="card-body">
+      <div style="font-size:12px;color:var(--muted);margin-bottom:14px;">
+        Prediksi harga jika kurs USD/IDR berubah ke Rp17.500 / Rp18.000 / Rp18.500 / Rp19.000
+      </div>
+      <div class="pred-grid" id="pred-grid">
+        <div class="loading">Menunggu model Spark MLlib...</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ROW 5: Simulasi Subsidi -->
+  <div class="card">
+    <div class="card-head">
+      <div class="card-title">⚖️ Simulasi Dampak Kebijakan Subsidi 10%</div>
+      <span class="card-badge badge-purple">Fitur Unggulan</span>
+    </div>
+    <div class="card-body">
+      <div class="subsidi-summary" id="subsidi-summary">
+        <div class="stat-box"><div class="stat-val" id="s-keluarga">–</div><div class="stat-lbl">Keluarga Terbantu</div></div>
+        <div class="stat-box"><div class="stat-val" id="s-inflasi">–</div><div class="stat-lbl">Dampak Inflasi (ppt)</div></div>
+        <div class="stat-box"><div class="stat-val" id="s-anggaran">–</div><div class="stat-lbl">Total Anggaran</div></div>
+      </div>
+      <div style="overflow-x:auto;">
+        <table id="tabel-subsidi">
+          <thead><tr>
+            <th>Komoditas</th><th>Harga Sekarang</th><th>Subsidi/unit</th>
+            <th>Harga Setelah</th><th>Dampak Inflasi</th><th>Anggaran</th>
+          </tr></thead>
+          <tbody id="subsidi-tbody"><tr><td colspan="6" class="loading">Menunggu analisis Spark...</td></tr></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <!-- ROW 6: Frekuensi Berita -->
+  <div class="card">
+    <div class="card-head">
+      <div class="card-title">📣 Frekuensi Komoditas di Berita Ekonomi</div>
+      <span class="card-badge badge-yellow">NLP Spark</span>
+    </div>
+    <div class="card-body">
+      <canvas id="chart-berita" style="max-height:220px;"></canvas>
+    </div>
+  </div>
+
+</main>
+
+<footer class="footer">
+  Big Data Analytics — Kurs USD &amp; Stabilisasi Harga Pangan &nbsp;|&nbsp;
+  Apache Kafka · Hadoop HDFS · Apache Spark · Flask &nbsp;|&nbsp;
+  Auto-refresh setiap 30 detik
+</footer>
+
+<script>
+// ════════════════════════════════════════════════════
+// UTILS
+// ════════════════════════════════════════════════════
+const fmt = n => new Intl.NumberFormat('id-ID').format(Math.round(n));
+const fmtK = n => {
+  if (Math.abs(n) >= 1e12) return (n/1e12).toFixed(1) + ' T';
+  if (Math.abs(n) >= 1e9)  return (n/1e9).toFixed(1) + ' M';
+  if (Math.abs(n) >= 1e6)  return (n/1e6).toFixed(1) + ' jt';
+  return fmt(n);
+};
+
+let _chartKorelasi   = null;
+let _chartVolatilitas = null;
+let _chartBerita     = null;
+let _kurs_prev       = null;
+
+
+// ════════════════════════════════════════════════════
+// FETCH + RENDER
+// ════════════════════════════════════════════════════
+async function fetchData() {
+  try {
+    const res  = await fetch('/api/data');
+    if (!res.ok) throw new Error('API error ' + res.status);
+    const data = await res.json();
+
+    renderKurs(data.kurs);
+    renderHarga(data.harga_pangan);
+    renderBerita(data.berita);
+    if (data.spark && Object.keys(data.spark).length) {
+      renderKorelasiChart(data.spark.korelasi_kurs || []);
+      renderVolatilitasChart(data.spark.volatilitas || []);
+      renderHeatmap(data.spark.heatmap || {});
+      renderPrediksi(data.spark.prediksi || []);
+      renderSubsidi(data.spark.simulasi_subsidi || {});
+      renderBeritaChart(data.spark.berita || {});
+    }
+
+    document.getElementById('last-update').textContent =
+      'Update: ' + new Date().toLocaleTimeString('id-ID');
+  } catch (e) {
+    console.error('fetchData:', e);
+  }
+}
+
+
+// ── KURS ──
+function renderKurs(kurs) {
+  if (!kurs) return;
+  const el     = document.getElementById('kurs-nilai');
+  const elCh   = document.getElementById('kurs-change');
+  const elSrc  = document.getElementById('kurs-sumber');
+
+  el.textContent = 'Rp' + fmt(kurs.nilai);
+  if (_kurs_prev && _kurs_prev !== kurs.nilai) {
+    const delta = kurs.nilai - _kurs_prev;
+    const pct   = ((delta / _kurs_prev) * 100).toFixed(2);
+    elCh.textContent  = (delta > 0 ? '▲ +' : '▼ ') + fmt(Math.abs(delta)) + ' (' + pct + '%)';
+    elCh.style.background = delta > 0 ? 'rgba(248,81,73,.2)'  : 'rgba(63,185,80,.2)';
+    elCh.style.color       = delta > 0 ? 'var(--red)'          : 'var(--green)';
+    elCh.style.borderColor = delta > 0 ? 'rgba(248,81,73,.4)'  : 'rgba(63,185,80,.4)';
+  }
+  _kurs_prev = kurs.nilai;
+  elSrc.textContent = 'Sumber: ' + kurs.sumber + ' | ' + new Date(kurs.updated_at).toLocaleTimeString('id-ID');
+}
+
+
+// ── HARGA ──
+function renderHarga(harga) {
+  const grid = document.getElementById('harga-grid');
+  if (!harga || !Object.keys(harga).length) {
+    grid.innerHTML = '<div class="loading">Menunggu data dari producer &amp; consumer...</div>';
+    return;
+  }
+  grid.innerHTML = Object.entries(harga).map(([nama, d]) => {
+    const dampak = d.dampak_kurs_rp || 0;
+    const cls    = dampak >= 0 ? 'up' : 'down';
+    const sign   = dampak >= 0 ? '+' : '';
+    return `<div class="harga-item">
+      <div class="harga-nama">${nama}</div>
+      <div class="harga-nilai">Rp${fmt(d.harga_rp)}</div>
+      <div class="harga-satuan">${d.satuan || '/kg'}</div>
+      <div class="harga-dampak ${cls}">Dampak kurs: ${sign}Rp${fmt(Math.abs(dampak))}</div>
+      <div class="harga-time">${d.timestamp ? new Date(d.timestamp).toLocaleTimeString('id-ID') : ''}</div>
+    </div>`;
+  }).join('');
+}
+
+
+// ── CHART KORELASI ──
+function renderKorelasiChart(data) {
+  if (!data.length) return;
+  const labels = data.map(d => d.komoditas);
+  const values = data.map(d => d.korelasi);
+  const colors = values.map(v =>
+    v > 0.7 ? 'rgba(248,81,73,.8)' :
+    v > 0.4 ? 'rgba(210,153,34,.8)' :
+    'rgba(88,166,255,.8)'
+  );
+  const ctx = document.getElementById('chart-korelasi').getContext('2d');
+  if (_chartKorelasi) _chartKorelasi.destroy();
+  _chartKorelasi = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Korelasi Kurs vs Harga',
+        data: values,
+        backgroundColor: colors,
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: {
+            label: c => ` ${c.raw.toFixed(4)} — ${data[c.dataIndex].interpretasi}`
+          }
+        }
+      },
+      scales: {
+        x: { min: 0, max: 1, ticks: { color: '#7d8590' }, grid: { color: 'rgba(255,255,255,.05)' } },
+        y: { ticks: { color: '#e6edf3', font: { size: 11 } }, grid: { display: false } }
+      }
+    }
+  });
+}
+
+
+// ── CHART VOLATILITAS ──
+function renderVolatilitasChart(data) {
+  if (!data.length) return;
+  const labels = data.map(d => d.komoditas);
+  const values = data.map(d => d.volatilitas_pct || 0);
+  const ctx = document.getElementById('chart-volatilitas').getContext('2d');
+  if (_chartVolatilitas) _chartVolatilitas.destroy();
+  _chartVolatilitas = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Volatilitas (%)',
+        data: values,
+        backgroundColor: 'rgba(188,140,255,.7)',
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      indexAxis: 'y',
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#7d8590', callback: v => v + '%' }, grid: { color: 'rgba(255,255,255,.05)' } },
+        y: { ticks: { color: '#e6edf3', font: { size: 11 } }, grid: { display: false } }
+      }
+    }
+  });
+}
+
+
+// ── HEATMAP ──
+function renderHeatmap(data) {
+  const container = document.getElementById('heatmap-container');
+  const komoditas = data.komoditas || [];
+  const matrix    = data.matrix   || [];
+  if (!komoditas.length || !matrix.length) {
+    container.innerHTML = '<div class="loading">Data heatmap belum tersedia (butuh lebih banyak records)</div>';
+    return;
+  }
+
+  function heatColor(v) {
+    const a = Math.abs(v);
+    if (a >= 0.8) return v > 0 ? '#dc2626' : '#2563eb';
+    if (a >= 0.6) return v > 0 ? '#ea580c' : '#3b82f6';
+    if (a >= 0.4) return v > 0 ? '#ca8a04' : '#60a5fa';
+    if (a >= 0.2) return v > 0 ? '#4d7c0f' : '#93c5fd';
+    return 'rgba(255,255,255,.06)';
+  }
+
+  const shortName = n => n.split(' ').slice(-1)[0].substring(0, 8);
+  let html = '<table class="heatmap-table"><tr><th></th>';
+  komoditas.forEach(k => { html += `<th title="${k}">${shortName(k)}</th>`; });
+  html += '</tr>';
+  matrix.forEach((row, i) => {
+    html += `<tr><th style="text-align:right;padding-right:6px;" title="${komoditas[i]}">${shortName(komoditas[i])}</th>`;
+    row.forEach(v => {
+      html += `<td style="background:${heatColor(v)};color:#fff;" title="${v.toFixed(3)}">${v.toFixed(2)}</td>`;
+    });
+    html += '</tr>';
+  });
+  html += '</table>';
+  container.innerHTML = html;
+}
+
+
+// ── BERITA ──
+function renderBerita(berita) {
+  const el = document.getElementById('berita-list');
+  if (!berita || !berita.length) {
+    el.innerHTML = '<div class="loading">Menunggu RSS producer...</div>';
+    return;
+  }
+  el.innerHTML = berita.map(b => `
+    <div class="berita-item">
+      <div class="berita-judul">
+        <a href="${b.url}" target="_blank" rel="noopener noreferrer">${b.judul}</a>
+      </div>
+      <div class="berita-meta">
+        <span class="tag-sumber">${b.sumber}</span>
+        ${b.relevan_pangan ? '<span class="tag-relevan">🌾 Pangan</span>' : ''}
+        ${b.relevan_kurs   ? '<span class="tag-kurs">💱 Kurs</span>'   : ''}
+        <span class="tag-sumber">${b.published ? new Date(b.published).toLocaleString('id-ID') : (b.timestamp ? new Date(b.timestamp).toLocaleString('id-ID') : '')}</span>
+      </div>
+    </div>
+  `).join('');
+}
+
+
+// ── PREDIKSI ──
+function renderPrediksi(data) {
+  const grid = document.getElementById('pred-grid');
+  if (!data.length) {
+    grid.innerHTML = '<div class="loading">Belum ada model (butuh lebih banyak data)</div>';
+    return;
+  }
+  grid.innerHTML = data.map(d => `
+    <div class="pred-item">
+      <div class="pred-nama">${d.komoditas}</div>
+      <div class="pred-r2">R² = ${d.r2_score} &nbsp;|&nbsp; RMSE = ${fmt(d.rmse)}</div>
+      <div class="pred-rows">
+        ${Object.entries(d.prediksi).map(([kurs, harga]) =>
+          `<div class="pred-row">
+            <span class="pred-kurs">Rp${fmt(kurs)}/USD</span>
+            <span class="pred-harga">→ Rp${fmt(harga)}</span>
+          </div>`
+        ).join('')}
+      </div>
+    </div>
+  `).join('');
+}
+
+
+// ── SUBSIDI ──
+function renderSubsidi(data) {
+  const skenario = data.skenario_subsidi_10pct || [];
+  if (!skenario.length) return;
+
+  document.getElementById('s-keluarga').textContent = fmtK(data.keluarga_miskin || 0);
+  document.getElementById('s-inflasi').textContent  =
+    (data.total_dampak_inflasi_ppt || 0).toFixed(3) + ' ppt';
+  document.getElementById('s-anggaran').textContent =
+    'Rp ' + fmtK(data.total_anggaran_rp || 0);
+
+  const tbody = document.getElementById('subsidi-tbody');
+  tbody.innerHTML = skenario.map(s => `
+    <tr>
+      <td>${s.komoditas}</td>
+      <td>Rp${fmt(s.harga_sekarang)}</td>
+      <td class="up">−Rp${fmt(s.subsidi_rp_per_unit)}</td>
+      <td class="down">Rp${fmt(s.harga_setelah)}</td>
+      <td class="down">${s.dampak_inflasi_ppt} ppt</td>
+      <td>Rp${fmtK(s.anggaran_rp)}</td>
+    </tr>
+  `).join('');
+}
+
+
+// ── BERITA CHART ──
+function renderBeritaChart(data) {
+  const frek   = data.frekuensi || {};
+  const labels = Object.keys(frek);
+  const values = Object.values(frek);
+  if (!labels.length) return;
+
+  const ctx = document.getElementById('chart-berita').getContext('2d');
+  if (_chartBerita) _chartBerita.destroy();
+  _chartBerita = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Frekuensi di berita',
+        data: values,
+        backgroundColor: 'rgba(210,153,34,.7)',
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      plugins: { legend: { display: false } },
+      scales: {
+        x: { ticks: { color: '#e6edf3' }, grid: { color: 'rgba(255,255,255,.05)' } },
+        y: { ticks: { color: '#7d8590' }, grid: { color: 'rgba(255,255,255,.05)' } }
+      }
+    }
+  });
+}
+
+
+// ════════════════════════════════════════════════════
+// INIT
+// ════════════════════════════════════════════════════
+fetchData();
+setInterval(fetchData, 30_000);   // auto-refresh 30 detik
+</script>
+</body>
+</html>

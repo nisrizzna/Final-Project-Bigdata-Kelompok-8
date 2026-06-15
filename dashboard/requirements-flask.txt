@@ -1,0 +1,6 @@
+# Flask dashboard requirements (tanpa PySpark)
+flask>=3.0.0
+flask-cors>=4.0.0
+yfinance>=0.2.28
+requests>=2.31.0
+python-dotenv>=1.0.0
