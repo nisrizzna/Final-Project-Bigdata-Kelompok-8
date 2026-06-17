@@ -5,11 +5,16 @@ KAFKA PRODUCER — Berita Ekonomi RSS Real-Time
 Sumber: Bisnis.com, Kompas, Detik Finance, CNBC Indonesia, Antara
 Output: Kafka topic 'pangan-rss'
 
+Tambahan fitur:
+  - Sentiment score per artikel (+1 positif / 0 netral / -1 negatif)
+  - Label penyebab dominan: "kurs" / "cuaca" / "kebijakan" / "pasokan" / "umum"
+  - Field sentiment_score dan sentiment_label ditambah ke setiap payload
+
 Jalankan:
   python kafka/producer_rss.py
 """
 
-import json, time, logging, hashlib, os
+import json, time, logging, hashlib, os, random
 from datetime import datetime
 from kafka import KafkaProducer
 import feedparser
@@ -41,6 +46,33 @@ KEYWORDS_KURS = [
     "dolar", "rupiah", "kurs", "dollar", "forex",
     "nilai tukar", "bi rate", "bank indonesia", "depresiasi",
 ]
+
+# [BARU] Keyword untuk Sentiment Scoring
+# Kata-kata yang menandakan kondisi NEGATIF → harga cenderung naik
+KEYWORDS_NEGATIF = [
+    "gagal panen", "kelangkaan", "embargo", "kenaikan harga", "lonjakan harga",
+    "harga melonjak", "harga naik", "harga melambung", "cuaca ekstrem",
+    "banjir", "kekeringan", "hama", "puso", "defisit", "mahal",
+    "langka", "krisis pangan", "impor terhambat", "pasokan terganggu",
+    "inflasi tinggi", "depresiasi rupiah", "rupiah melemah", "dolar menguat",
+]
+
+# Kata-kata yang menandakan kondisi POSITIF → harga cenderung stabil/turun
+KEYWORDS_POSITIF = [
+    "panen raya", "stok aman", "subsidi", "impor masuk", "harga turun",
+    "harga stabil", "pasokan melimpah", "surplus", "cadangan cukup",
+    "operasi pasar", "bulog menjamin", "ketahanan pangan", "panen melimpah",
+    "produksi meningkat", "ekspor meningkat", "rupiah menguat", "dolar melemah",
+    "harga terjangkau", "stabilisasi harga", "intervensi pemerintah",
+]
+
+# Keyword untuk mendeteksi PENYEBAB dominan dari berita
+KEYWORDS_PENYEBAB = {
+    "kurs"      : ["dolar", "kurs", "rupiah", "depresiasi", "forex", "nilai tukar", "dollar"],
+    "cuaca"     : ["cuaca", "banjir", "kekeringan", "hujan", "el nino", "la nina", "iklim", "kemarau"],
+    "kebijakan" : ["kebijakan", "impor", "ekspor", "subsidi", "tarif", "regulasi", "pemerintah", "kemendag", "bapanas"],
+    "pasokan"   : ["stok", "pasokan", "distribusi", "logistik", "gudang", "rantai pasok", "bulog", "kelangkaan"],
+}
 
 _sent_urls: set = set()
 
@@ -89,28 +121,65 @@ MOCK_ARTICLES = [
         "judul": "Dampak Inflasi Global Terhadap Harga Gula Pasir Impor",
         "summary": "Kenaikan harga gula pasir internasional mulai berdampak pada harga jual gula kristal putih di tingkat konsumen dalam negeri.",
         "sumber": "CNBC Indonesia"
-    }
+    },
+    {
+        "judul": "Rupiah Melemah ke Rp18.200, Harga Bawang Putih Impor Terancam Naik",
+        "summary": "Depresiasi rupiah terhadap dolar AS berdampak langsung pada harga komoditas impor seperti bawang putih dan daging sapi di pasar domestik.",
+        "sumber": "CNBC Indonesia"
+    },
+    {
+        "judul": "Operasi Pasar Murah Bulog Berhasil Tekan Harga Beras di 10 Kota",
+        "summary": "Intervensi pemerintah melalui operasi pasar murah terbukti efektif menstabilkan harga beras premium di sejumlah kota besar Indonesia.",
+        "sumber": "Antara Ekonomi"
+    },
 ]
 
-import random
+# [BARU] Fungsi Sentiment Scoring
+def hitung_sentiment(judul: str, summary: str) -> int:
+    """
+    Hitung sentiment score berdasarkan keyword matching.
+    Return:
+        +1 = sentimen positif (berita baik untuk harga, cenderung stabil/turun)
+        -1 = sentimen negatif (berita buruk untuk harga, cenderung naik)
+         0 = netral / tidak dapat ditentukan
+    Jika ada konflik (ada keyword positif DAN negatif), negatif lebih diprioritaskan
+    karena dalam konteks ketahanan pangan, berita buruk lebih kritis untuk diwaspadai.
+    """
+    teks = (judul + " " + summary).lower()
 
-def generate_mock_article() -> dict:
-    item = random.choice(MOCK_ARTICLES)
-    now = datetime.now()
-    url = f"https://mocknews.co/berita/pangan/{hashlib.md5(item['judul'].encode()).hexdigest()[:8]}_{now.strftime('%H%M%S')}"
-    tag = tag_relevansi(item["judul"], item["summary"])
-    return {
-        "id"        : hash_url(url),
-        "url"       : url,
-        "judul"     : f"[SIMULASI] {item['judul']}",
-        "summary"   : item["summary"],
-        "sumber"    : item["sumber"],
-        "published" : now.strftime("%a, %d %b %Y %H:%M:%S +0700"),
-        "timestamp" : now.isoformat(),
-        **tag,
-    }
+    ada_negatif = any(k in teks for k in KEYWORDS_NEGATIF)
+    ada_positif = any(k in teks for k in KEYWORDS_POSITIF)
+
+    if ada_negatif:
+        return -1   # prioritaskan negatif (lebih kritis untuk sistem peringatan dini)
+    if ada_positif:
+        return +1
+    return 0
 
 
+def deteksi_penyebab(judul: str, summary: str) -> str:
+    """
+    Deteksi penyebab dominan dari isi berita.
+    Berguna untuk Orang 2 (ML) dan Orang 3 (dashboard) agar bisa menampilkan
+    label penyebab pada panel alert, bukan hanya skor angka.
+
+    Return: "kurs" / "cuaca" / "kebijakan" / "pasokan" / "umum"
+    """
+    teks  = (judul + " " + summary).lower()
+    skor  = {kategori: 0 for kategori in KEYWORDS_PENYEBAB}
+
+    for kategori, keywords in KEYWORDS_PENYEBAB.items():
+        for kw in keywords:
+            if kw in teks:
+                skor[kategori] += 1
+
+    # Ambil kategori dengan skor tertinggi
+    max_skor = max(skor.values())
+    if max_skor == 0:
+        return "umum"
+    return max(skor, key=skor.get)
+
+# Fungsi lama (tidak diubah)
 def hash_url(url: str) -> str:
     return hashlib.md5(url.encode()).hexdigest()[:12]
 
@@ -127,10 +196,39 @@ def tag_relevansi(judul: str, summary: str) -> dict:
     }
 
 
+def generate_mock_article() -> dict:
+    item = random.choice(MOCK_ARTICLES)
+    now  = datetime.now()
+    url  = f"https://mocknews.co/berita/pangan/{hashlib.md5(item['judul'].encode()).hexdigest()[:8]}_{now.strftime('%H%M%S')}"
+    tag  = tag_relevansi(item["judul"], item["summary"])
+
+    # [BARU] tambah sentiment ke mock article
+    sentiment = hitung_sentiment(item["judul"], item["summary"])
+    penyebab  = deteksi_penyebab(item["judul"], item["summary"])
+
+    return {
+        "id"               : hash_url(url),
+        "url"              : url,
+        "judul"            : f"[SIMULASI] {item['judul']}",
+        "summary"          : item["summary"],
+        "sumber"           : item["sumber"],
+        "published"        : now.strftime("%a, %d %b %Y %H:%M:%S +0700"),
+        "timestamp"        : now.isoformat(),
+        "sentiment_score"  : sentiment,           # [BARU] +1 / 0 / -1
+        "sentiment_label"  : (                    # [BARU] label teks untuk dashboard
+            "positif" if sentiment == 1
+            else "negatif" if sentiment == -1
+            else "netral"
+        ),
+        "penyebab_dominan" : penyebab,            # [BARU] "kurs"/"cuaca"/"kebijakan"/"pasokan"/"umum"
+        **tag,
+    }
+
+
 def fetch_rss(feed: dict) -> list:
     try:
-        parsed   = feedparser.parse(feed["url"])
-        artikel  = []
+        parsed  = feedparser.parse(feed["url"])
+        artikel = []
         for entry in parsed.entries[:20]:
             url = entry.get("link", "")
             if not url or url in _sent_urls:
@@ -139,14 +237,26 @@ def fetch_rss(feed: dict) -> list:
             summary   = entry.get("summary", entry.get("description", ""))
             published = entry.get("published", datetime.now().isoformat())
             tag       = tag_relevansi(judul, summary)
+
+            # [BARU] hitung sentiment dan penyebab sebelum kirim ke Kafka
+            sentiment = hitung_sentiment(judul, summary)
+            penyebab  = deteksi_penyebab(judul, summary)
+
             artikel.append({
-                "id"        : hash_url(url),
-                "url"       : url,
-                "judul"     : judul[:300],
-                "summary"   : summary[:500],
-                "sumber"    : feed["nama"],
-                "published" : published,
-                "timestamp" : datetime.now().isoformat(),
+                "id"               : hash_url(url),
+                "url"              : url,
+                "judul"            : judul[:300],
+                "summary"          : summary[:500],
+                "sumber"           : feed["nama"],
+                "published"        : published,
+                "timestamp"        : datetime.now().isoformat(),
+                "sentiment_score"  : sentiment,       # [BARU] +1 / 0 / -1
+                "sentiment_label"  : (                # [BARU] label untuk dashboard
+                    "positif" if sentiment == 1
+                    else "negatif" if sentiment == -1
+                    else "netral"
+                ),
+                "penyebab_dominan" : penyebab,        # [BARU] kategori penyebab
                 **tag,
             })
         return artikel
@@ -160,6 +270,7 @@ def main():
     log.info("  PRODUCER RSS — Berita Ekonomi Indonesia Real-Time")
     log.info(f"  Kafka: {KAFKA_BOOTSTRAP} | Topic: {TOPIC_RSS}")
     log.info(f"  Feed: {len(RSS_FEEDS)} sumber | Interval: {INTERVAL}s")
+    log.info("  [REVISI] Sentiment scoring aktif (+1/0/-1)")   # [BARU]
     log.info("=" * 55)
 
     producer = KafkaProducer(
@@ -177,10 +288,15 @@ def main():
                 producer.send(TOPIC_RSS, key=art["id"], value=art)
                 _sent_urls.add(art["url"])
                 total_sent += 1
-                rel = "✓ RELEVAN" if (art["relevan_pangan"] or art["relevan_kurs"]) else "  biasa  "
-                log.info(f"  [{feed['nama'][:15]:15s}] {rel} | {art['judul'][:55]}")
 
-        # Hanya kirim berita asli dari RSS feeds (tidak ada lagi injeksi berita simulasi)
+                # [DIUPDATE] log sekarang tampilkan sentiment score juga
+                rel       = "✓ RELEVAN" if (art["relevan_pangan"] or art["relevan_kurs"]) else "  biasa  "
+                skor_icon = "📈" if art["sentiment_score"] == 1 else ("📉" if art["sentiment_score"] == -1 else "➖")
+                log.info(
+                    f"  [{feed['nama'][:15]:15s}] {rel} {skor_icon} "
+                    f"[{art['sentiment_label']:8s}|{art['penyebab_dominan']:10s}] "
+                    f"{art['judul'][:45]}"
+                )
 
         producer.flush()
         log.info(f"  ✓ {total_sent} artikel terkirim | {len(_sent_urls)} total unik")
