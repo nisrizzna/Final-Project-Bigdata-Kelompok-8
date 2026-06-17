@@ -48,6 +48,26 @@ fp/
 | Flask Dashboard  | fp-flask (Dockerfile)           | 5002 (Host)  | Dashboard UI Utama (UI: http://localhost:5002) |
 | Kafka Consumer   | fp-consumer (Dockerfile.consumer)| -           | Otomatis flush data ke HDFS & file lokal     |
 
+## Data Pipeline & Feature Engineering 
+Tiga file di bawah ini diperluas agar menyediakan fitur historis dan sinyal musiman yang dibutuhkan model prediksi dan dashboard.
+
+`kafka/producer_api.py`
+- Kurs USD/IDR historis 30 hari dari yfinance (window diperluas dari 2d menjadi 35d, diambil sekali saat startup), dengan fallback simulasi kalau `yfinance` gagal diakses.
+- Harga historis 30 hari per komoditas, disimpan sebagai time series rolling (`historis_30h`) di setiap payload.
+- Field turunan untuk fitur model: harga_kemarin (lag_1), `kurs_7d_avg`, `kurs_30d_avg`.
+- Flag musiman berbasis kalender Indonesia: `flag_lebaran` (mencakup Lebaran, Nataru, Idul Adha), `flag_panen` (dua musim panen raya nasional), `flag_impor_ekspor` (bulan-bulan kebijakan impor aktif), beserta label `musim_event`.
+
+`kafka/producer_rss.py`
+- Sentiment scoring sederhana berbasis keyword matching: setiap artikel diberi skor +1 (positif, mis. "panen raya", "stok aman"), 0 (netral), atau -1 (negatif, mis. "gagal panen", "kelangkaan"). Saat keyword positif dan negatif sama-sama muncul, skor negatif diprioritaskan karena lebih kritis untuk peringatan dini.
+- Deteksi penyebab dominan per artikel (`penyebab_dominan`): "kurs", "cuaca", "kebijakan", "pasokan", atau "umum", dipakai dashboard untuk menampilkan label penyebab, bukan hanya angka.
+- Setiap payload artikel kini menyertakan `sentiment_score`, `sentiment_label`, dan `penyebab_dominan`.
+
+`kafka/consumer_to_hdfs.py`
+- Struktur penyimpanan HDFS baru yang ramah time series: `/data/pangan/timeseries/{slug_komoditas}/{tanggal}.json`, terpisah dari struktur batch lama yang tetap dipertahankan untuk kompatibilitas.
+- Agregasi harian otomatis per komoditas (harga rata-rata/min/max, kurs rata-rata, flag musiman) yang diperbarui setiap siklus flush.
+- Output lokal baru `dashboard/data/timeseries_{komoditas}.json` berisi array ringkasan 30 hari per komoditas, langsung dapat dibaca dashboard tanpa query ke HDFS.
+`live_summary.json` diperkaya dengan field dari producer revisi (`harga_kemarin`, `kurs_7d_avg`, `kurs_30d_avg`, flag musiman) agar dashboard bisa menampilkan konteks tambahan di panel harga terkini.
+
 ## Cara Menjalankan
 
 ### Prasyarat
