@@ -25,7 +25,13 @@ from pyspark.sql import SparkSession
 from pyspark.sql import functions as F
 from pyspark.sql.types import StructType, StructField, StringType, BooleanType, ArrayType
 from pyspark.ml.feature import VectorAssembler
-from pyspark.ml.regression import LinearRegression
+from pyspark.sql import Window
+from pyspark.sql import Window
+from pyspark.ml.regression import LinearRegression, GBTRegressor
+from pyspark.sql import Window
+from pyspark.ml.regression import LinearRegression, GBTRegressor
+from pyspark.ml.evaluation import RegressionEvaluator
+from pyspark.ml.evaluation import RegressionEvaluator
 
 HDFS_BASE   = os.getenv("HDFS_NAMENODE", "hdfs://namenode:8020") + "/data/pangan"
 LOCAL_INPUT = Path(os.getenv("LOCAL_INPUT_DIR", str(Path(__file__).parent.parent / "dashboard" / "data")))
@@ -229,49 +235,262 @@ def analisis_berita(df_rss) -> dict:
 
 
 # ════════════════════════════════════════════════════════
-# ANALISIS 5: Prediksi Harga — Spark MLlib
+# HELPER: Sentiment per Komoditas dari live_rss.json
 # ════════════════════════════════════════════════════════
-def analisis_prediksi(df_api, spark) -> list:
-    print("\n[5] Prediksi Harga — MLlib LinearRegression ...")
-    hasil          = []
-    KURS_PREDIKSI  = [17_500, 18_000, 18_500, 19_000]
-    assembler      = VectorAssembler(inputCols=["kurs_usd_idr"], outputCol="features")
-
-    for row in df_api.select("komoditas").distinct().collect():
-        komoditas = row["komoditas"]
-        if komoditas is None:
-            continue
-        df_k = (df_api
-            .filter(F.col("komoditas") == komoditas)
-            .select("harga_rp", "kurs_usd_idr")
+def load_sentiment_per_komoditas(spark):
+    rss_file = LOCAL_INPUT / "live_rss.json"
+    if not rss_file.exists():
+        print("  [WARN] live_rss.json tidak ditemukan, sentiment default 0")
+        return {}
+    try:
+        df_rss = spark.read.json(str(rss_file))
+        if "komoditas_tag" not in df_rss.columns or "sentiment_score" not in df_rss.columns:
+            return {}
+        df_expl = (df_rss
+            .filter(F.col("relevan_pangan") == True)
+            .select(F.explode("komoditas_tag").alias("komoditas"), "sentiment_score")
             .dropna()
         )
-        if df_k.count() < 10:
+        result = (df_expl
+            .groupBy("komoditas")
+            .agg(F.mean("sentiment_score").alias("sentiment_avg"))
+            .collect()
+        )
+        return {r["komoditas"]: round(float(r["sentiment_avg"]), 3) for r in result}
+    except Exception as e:
+        print(f"  [WARN] Gagal load sentiment: {e}")
+        return {}
+
+
+# ════════════════════════════════════════════════════════
+# HELPER: Sentiment per Komoditas dari live_rss.json
+# ════════════════════════════════════════════════════════
+def load_sentiment_per_komoditas(spark):
+    rss_file = LOCAL_INPUT / "live_rss.json"
+    if not rss_file.exists():
+        print("  [WARN] live_rss.json tidak ditemukan, sentiment default 0")
+        return {}
+    try:
+        df_rss = spark.read.json(str(rss_file))
+        if "komoditas_tag" not in df_rss.columns or "sentiment_score" not in df_rss.columns:
+            return {}
+        df_expl = (df_rss
+            .filter(F.col("relevan_pangan") == True)
+            .select(F.explode("komoditas_tag").alias("komoditas"), "sentiment_score")
+            .dropna()
+        )
+        result = (df_expl
+            .groupBy("komoditas")
+            .agg(F.mean("sentiment_score").alias("sentiment_avg"))
+            .collect()
+        )
+        return {r["komoditas"]: round(float(r["sentiment_avg"]), 3) for r in result}
+    except Exception as e:
+        print(f"  [WARN] Gagal load sentiment: {e}")
+        return {}
+
+
+# ════════════════════════════════════════════════════════
+# ANALISIS 5: Prediksi Harga — GBTRegressor Multi-Fitur
+# ════════════════════════════════════════════════════════
+def analisis_prediksi(df_api, spark):
+    print("\n[5] Prediksi Harga — GBTRegressor Multi-Fitur ...")
+    ts_files = sorted(LOCAL_INPUT.glob("timeseries_*.json"))
+    if not ts_files:
+        print("  [WARN] Tidak ada timeseries_*.json — fallback ke live_api.json")
+        return _analisis_prediksi_fallback(df_api, spark)
+
+    sentiment_map = load_sentiment_per_komoditas(spark)
+    print(f"  ✓ Sentiment: {len(sentiment_map)} komoditas")
+    hasil = []
+
+    for ts_file in ts_files:
+        try:
+            df_ts = spark.read.json(str(ts_file))
+        except Exception as e:
+            print(f"  [SKIP] {ts_file.name}: gagal load — {e}")
             continue
 
-        df_vec = assembler.transform(df_k).select("features", F.col("harga_rp").alias("label"))
+        n_total = df_ts.count()
+        if n_total < 3:
+            print(f"  [SKIP] {ts_file.name}: hanya {n_total} baris (minimal 3)")
+            continue
+
+        komoditas_val = df_ts.select("komoditas").first()["komoditas"]
+        if not komoditas_val:
+            continue
+
+        df_ts = (df_ts
+            .withColumn("date",             F.to_date("tanggal", "yyyy-MM-dd"))
+            .withColumn("harga_avg",        F.col("harga_avg").cast("double"))
+            .withColumn("kurs_avg",         F.col("kurs_avg").cast("double"))
+            .withColumn("flag_lebaran",     F.col("flag_lebaran").cast("double"))
+            .withColumn("flag_panen",       F.col("flag_panen").cast("double"))
+            .withColumn("flag_impor_ekspor",F.col("flag_impor_ekspor").cast("double"))
+            .orderBy("date")
+        )
+        w = Window.orderBy("date")
+        df_feat = (df_ts
+            .withColumn("lag_1",           F.lag("harga_avg", 1).over(w))
+            .withColumn("lag_7",           F.lag("harga_avg", 7).over(w))
+            .withColumn("kurs_7d_avg",     F.avg("kurs_avg").over(w.rowsBetween(-6, 0)))
+            .withColumn("sentiment_score", F.lit(float(sentiment_map.get(komoditas_val, 0.0))))
+        )
+
+        has_lag7     = n_total >= 8
+        feature_cols = ["kurs_avg","kurs_7d_avg","flag_lebaran","flag_panen","flag_impor_ekspor","lag_1","sentiment_score"]
+        if has_lag7:
+            feature_cols.append("lag_7")
+
+        df_feat = df_feat.dropna(subset=feature_cols + ["harga_avg"])
+        n_rows  = df_feat.count()
+        if n_rows < 3:
+            print(f"  [SKIP] {komoditas_val}: setelah drop null hanya {n_rows} baris")
+            continue
+
+        w_rn      = Window.orderBy("date")
+        df_num    = df_feat.withColumn("_rn", F.row_number().over(w_rn))
+        cutoff    = max(int(n_rows * 0.8), n_rows - 3)
+        df_tr_raw = df_num.filter(F.col("_rn") <= cutoff).drop("_rn")
+        df_te_raw = df_num.filter(F.col("_rn") >  cutoff).drop("_rn")
+
+        assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
+        df_train  = assembler.transform(df_tr_raw).withColumnRenamed("harga_avg", "label")
+        df_test   = assembler.transform(df_te_raw).withColumnRenamed("harga_avg", "label")
+
         try:
-            model = LinearRegression(maxIter=100, regParam=0.01).fit(df_vec)
-            prediksi = {}
-            for kurs in KURS_PREDIKSI:
-                pred_df  = spark.createDataFrame([[kurs]], ["kurs_usd_idr"])
-                pred_vec = assembler.transform(pred_df)
-                pred     = model.transform(pred_vec).collect()[0]["prediction"]
-                prediksi[str(kurs)] = round(pred)
-
-            hasil.append({
-                "komoditas"  : komoditas,
-                "r2_score"   : round(model.summary.r2, 4),
-                "rmse"       : round(model.summary.rootMeanSquaredError, 2),
-                "koef_kurs"  : round(float(model.coefficients[0]), 4),
-                "intercept"  : round(float(model.intercept), 2),
-                "prediksi"   : prediksi,
-            })
+            model      = GBTRegressor(maxIter=20, maxDepth=3, stepSize=0.1, featuresCol="features", labelCol="label").fit(df_train)
+            model_name = "GBTRegressor"
         except Exception as e:
-            print(f"  [WARN] Prediksi {komoditas} gagal: {e}")
+            try:
+                model      = LinearRegression(maxIter=100, regParam=0.01, featuresCol="features", labelCol="label").fit(df_train)
+                model_name = "LinearRegression"
+            except Exception as e2:
+                print(f"  [ERROR] {komoditas_val}: {e2}")
+                continue
 
+        mae, mape_pct = 0.0, 0.0
+        if df_test.count() > 0:
+            try:
+                preds    = model.transform(df_test)
+                mae      = float(preds.withColumn("e", F.abs(F.col("prediction")-F.col("label"))).agg(F.mean("e")).collect()[0][0] or 0.0)
+                mape_pct = float(preds.withColumn("p", F.when(F.col("label")>0, F.abs((F.col("prediction")-F.col("label"))/F.col("label"))*100).otherwise(0.0)).agg(F.mean("p")).collect()[0][0] or 0.0)
+            except Exception:
+                pass
+
+        latest      = df_feat.orderBy(F.col("date").desc()).limit(1).collect()[0]
+        ld          = latest.asDict()
+        latest_harga = float(ld.get("harga_avg") or 0)
+        latest_kurs  = float(ld.get("kurs_avg")  or 0)
+        latest_kurs7 = float(ld.get("kurs_7d_avg") or latest_kurs)
+        latest_lag1  = float(ld.get("lag_1")  or latest_harga)
+        latest_lag7  = float(ld.get("lag_7")  or latest_harga) if has_lag7 else latest_harga
+        latest_leb   = float(ld.get("flag_lebaran")      or 0)
+        latest_panen = float(ld.get("flag_panen")        or 0)
+        latest_impor = float(ld.get("flag_impor_ekspor") or 0)
+        latest_sent  = float(sentiment_map.get(komoditas_val, 0.0))
+
+        kurs_proj = {7: latest_kurs*1.005, 14: latest_kurs*1.01, 30: latest_kurs*1.02}
+        prediksi  = {}
+        for hari, kurs_p in kurs_proj.items():
+            rd = {"kurs_avg":kurs_p,"kurs_7d_avg":latest_kurs7,"flag_lebaran":latest_leb,"flag_panen":latest_panen,"flag_impor_ekspor":latest_impor,"lag_1":latest_lag1,"sentiment_score":latest_sent}
+            if has_lag7: rd["lag_7"] = latest_lag7
+            pv = float(model.transform(assembler.transform(spark.createDataFrame([rd]))).collect()[0]["prediction"])
+            prediksi[hari] = round(pv)
+
+        stats       = df_ts.agg(F.mean("harga_avg").alias("mean"), F.stddev("harga_avg").alias("std")).collect()[0]
+        h_mean      = float(stats["mean"] or latest_harga)
+        h_std       = float(stats["std"]  or latest_harga*0.05)
+        thr_waspada = round(h_mean + 1.5*h_std)
+        thr_bahaya  = round(h_mean + 2.0*h_std)
+
+        alerts = {}
+        for hari, pv in prediksi.items():
+            status = "BAHAYA" if pv>=thr_bahaya else "WASPADA" if pv>=thr_waspada else "AMAN"
+            alerts[f"t{hari}"] = {"hari_ke":hari,"prediksi":pv,"threshold_waspada":thr_waspada,"threshold_bahaya":thr_bahaya,"status":status}
+
+        print(f"  ✓ {komoditas_val:25s} | {model_name:16s} | t+7: Rp{prediksi[7]:>9,.0f} | t+14: Rp{prediksi[14]:>9,.0f} | t+30: Rp{prediksi[30]:>9,.0f} | MAE: {mae:>8,.0f} | MAPE: {mape_pct:.1f}%")
+        hasil.append({"komoditas":komoditas_val,"model":model_name,"n_data":n_rows,"harga_saat_ini":round(latest_harga),"kurs_saat_ini":round(latest_kurs),"prediksi_7h":prediksi[7],"prediksi_14h":prediksi[14],"prediksi_30h":prediksi[30],"mae":round(mae,2),"mape_pct":round(mape_pct,2),"alerts":alerts,"prediksi":{"18000":prediksi[14],"18500":prediksi[30]}})
+
+    print(f"\n  ✓ Total: {len(hasil)} komoditas diproses")
+    if not hasil:
+        print("  [INFO] Semua timeseries < 3 baris — fallback ke live_api.json")
+        return _analisis_prediksi_fallback(df_api, spark)
     return hasil
 
+
+def _analisis_prediksi_fallback(df_api, spark):
+    print("  [FALLBACK] Multi-fitur dari live_api.json ...")
+    feature_cols = ["kurs_usd_idr","kurs_7d_avg","flag_lebaran","flag_panen","flag_impor_ekspor","harga_kemarin"]
+    hasil = []
+    komoditas_list = [r["komoditas"] for r in df_api.select("komoditas").distinct().collect() if r["komoditas"]]
+
+    for komoditas in komoditas_list:
+        df_k = df_api.filter(F.col("komoditas")==komoditas).select(["harga_rp"]+feature_cols).dropna()
+        n_rows = df_k.count()
+        if n_rows < 3:
+            continue
+        assembler = VectorAssembler(inputCols=feature_cols, outputCol="features", handleInvalid="skip")
+        df_vec    = assembler.transform(df_k).withColumnRenamed("harga_rp", "label")
+        w_rn      = Window.orderBy(F.monotonically_increasing_id())
+        df_num    = df_vec.withColumn("_rn", F.row_number().over(w_rn))
+        cutoff    = max(int(n_rows*0.8), n_rows-2)
+        df_train  = df_num.filter(F.col("_rn")<=cutoff).drop("_rn")
+        df_test   = df_num.filter(F.col("_rn")>cutoff).drop("_rn")
+
+        try:
+            model      = GBTRegressor(maxIter=20, maxDepth=3, stepSize=0.1, featuresCol="features", labelCol="label").fit(df_train)
+            model_name = "GBT(fallback)"
+        except Exception:
+            try:
+                model      = LinearRegression(maxIter=100, regParam=0.01, featuresCol="features", labelCol="label").fit(df_train)
+                model_name = "LR(fallback)"
+            except Exception as e2:
+                print(f"  [ERROR] {komoditas}: {e2}")
+                continue
+
+        mae, mape_pct = 0.0, 0.0
+        if df_test.count() > 0:
+            try:
+                preds    = model.transform(df_test)
+                mae      = float(preds.withColumn("e", F.abs(F.col("prediction")-F.col("label"))).agg(F.mean("e")).collect()[0][0] or 0.0)
+                mape_pct = float(preds.withColumn("p", F.when(F.col("label")>0, F.abs((F.col("prediction")-F.col("label"))/F.col("label"))*100).otherwise(0.0)).agg(F.mean("p")).collect()[0][0] or 0.0)
+            except Exception:
+                pass
+
+        latest   = df_k.orderBy(F.monotonically_increasing_id().desc()).limit(1).collect()[0]
+        ld       = latest.asDict()
+        lh       = float(ld.get("harga_rp")          or 0)
+        lk       = float(ld.get("kurs_usd_idr")      or 0)
+        lk7      = float(ld.get("kurs_7d_avg")       or lk)
+        lkem     = float(ld.get("harga_kemarin")      or lh)
+        lleb     = float(ld.get("flag_lebaran")       or 0)
+        lpanen   = float(ld.get("flag_panen")         or 0)
+        limpor   = float(ld.get("flag_impor_ekspor")  or 0)
+
+        kurs_proj = {7:lk*1.005, 14:lk*1.01, 30:lk*1.02}
+        prediksi  = {}
+        for hari, kurs_p in kurs_proj.items():
+            rd = {"kurs_usd_idr":kurs_p,"kurs_7d_avg":lk7,"flag_lebaran":lleb,"flag_panen":lpanen,"flag_impor_ekspor":limpor,"harga_kemarin":lkem}
+            pv = float(model.transform(assembler.transform(spark.createDataFrame([rd]))).collect()[0]["prediction"])
+            prediksi[hari] = round(pv)
+
+        stats       = df_k.agg(F.mean("harga_rp").alias("mean"), F.stddev("harga_rp").alias("std")).collect()[0]
+        h_mean      = float(stats["mean"] or lh)
+        h_std       = float(stats["std"]  or lh*0.05)
+        thr_waspada = round(h_mean + 1.5*h_std)
+        thr_bahaya  = round(h_mean + 2.0*h_std)
+
+        alerts = {}
+        for hari, pv in prediksi.items():
+            status = "BAHAYA" if pv>=thr_bahaya else "WASPADA" if pv>=thr_waspada else "AMAN"
+            alerts[f"t{hari}"] = {"hari_ke":hari,"prediksi":pv,"threshold_waspada":thr_waspada,"threshold_bahaya":thr_bahaya,"status":status}
+
+        print(f"  ✓ {komoditas:25s} | {model_name:12s} | t+7: Rp{prediksi[7]:>9,.0f} | t+14: Rp{prediksi[14]:>9,.0f} | t+30: Rp{prediksi[30]:>9,.0f} | MAE: {mae:>8,.0f} | MAPE: {mape_pct:.1f}%")
+        hasil.append({"komoditas":komoditas,"model":model_name,"n_data":n_rows,"harga_saat_ini":round(lh),"kurs_saat_ini":round(lk),"prediksi_7h":prediksi[7],"prediksi_14h":prediksi[14],"prediksi_30h":prediksi[30],"mae":round(mae,2),"mape_pct":round(mape_pct,2),"alerts":alerts,"prediksi":{"18000":prediksi[14],"18500":prediksi[30]}})
+
+    print(f"\n  ✓ Fallback selesai: {len(hasil)} komoditas")
+    return hasil
 
 # ════════════════════════════════════════════════════════
 # ANALISIS 6: Simulasi Kebijakan Subsidi [UNGGULAN]
@@ -283,7 +502,7 @@ def analisis_simulasi_subsidi(hasil_prediksi: list, kurs_current: float = 18_100
     harga_pred = {}
     for p in hasil_prediksi:
         pred = p.get("prediksi", {})
-        harga_pred[p["komoditas"]] = pred.get("18000", pred.get("18500", 0))
+        harga_pred[p["komoditas"]] = p.get("prediksi_14h") or pred.get("18000", pred.get("18500", 0))
 
     skenario = []
     for komoditas, harga in harga_pred.items():
@@ -338,6 +557,17 @@ def main():
     hasil_prediksi    = analisis_prediksi(df_api, spark)
     hasil_subsidi     = analisis_simulasi_subsidi(hasil_prediksi)
 
+    # Kumpulkan alerts aktif
+    semua_alerts = []
+    for p in hasil_prediksi:
+        for horizon, alert in p.get("alerts", {}).items():
+            if alert.get("status") in ("WASPADA", "BAHAYA"):
+                semua_alerts.append({"komoditas":p["komoditas"],"horizon":horizon,"hari_ke":alert["hari_ke"],"prediksi":alert["prediksi"],"threshold_waspada":alert["threshold_waspada"],"threshold_bahaya":alert["threshold_bahaya"],"status":alert["status"],"harga_saat_ini":p.get("harga_saat_ini",0)})
+    semua_alerts.sort(key=lambda x: x["status"], reverse=True)
+
+    n_model = max(len(hasil_prediksi), 1)
+    evaluasi_model = {"n_komoditas_diproses":len(hasil_prediksi),"rata_rata_mae":round(sum(p.get("mae",0) for p in hasil_prediksi)/n_model,2),"rata_rata_mape_pct":round(sum(p.get("mape_pct",0) for p in hasil_prediksi)/n_model,2),"detail_per_komoditas":[{"komoditas":p["komoditas"],"model":p.get("model",""),"n_data":p.get("n_data",0),"mae":p.get("mae",0),"mape_pct":p.get("mape_pct",0)} for p in hasil_prediksi]}
+
     output = {
         "generated_at"    : datetime.now().isoformat(),
         "volatilitas"     : hasil_volatilitas,
@@ -345,6 +575,8 @@ def main():
         "heatmap"         : hasil_heatmap,
         "berita"          : hasil_berita,
         "prediksi"        : hasil_prediksi,
+        "alerts"          : semua_alerts,
+        "evaluasi_model"  : evaluasi_model,
         "simulasi_subsidi": hasil_subsidi,
     }
 
