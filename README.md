@@ -1,6 +1,6 @@
 # Big Data Analytics - Dampak Kurs Dollar terhadap Harga Pangan Indonesia
 
-Stack: Kafka, HDFS, Spark, Flask | Data: Real-Time | Deploy: Docker
+Stack: Kafka, HDFS, Spark, Flask | Data: Real-Time | Deploy: Docker | Repository: Kelompok 8
 
 ## Latar Belakang
 
@@ -8,17 +8,17 @@ Kurs dolar AS menembus Rp18.209 pada 9 Juni 2026. Indonesia masih mengimpor gand
 
 ## Arsitektur
 
-yfinance + hargapangan.id + RSS --> Apache Kafka --> Hadoop HDFS --> Apache Spark --> Flask Dashboard
+yfinance + hargapangan.id + RSS --> Apache Kafka --> Hadoop HDFS --> Apache Spark (Machine Learning Upgrade) --> Flask Dashboard
 
 ## Struktur Direktori
 
 ```
 fp/
-+-- docker-compose.yml       <- Semua services Docker
-+-- hadoop.env               <- Konfigurasi Hadoop
-+-- requirements.txt         <- Python dependencies
-+-- run.sh                   <- Script otomatis Linux/Mac
-+-- README.md                <- File ini
++-- docker-compose.yml        <- Semua services Docker
++-- hadoop.env                <- Konfigurasi Hadoop
++-- requirements.txt          <- Python dependencies
++-- run.sh                    <- Script otomatis Linux/Mac
++-- README.md                 <- File ini
 +-- scripts/
 |   +-- init_infrastructure.py  <- Init Kafka topics + HDFS
 +-- kafka/
@@ -26,166 +26,163 @@ fp/
 |   +-- producer_rss.py      <- Producer berita RSS
 |   +-- consumer_to_hdfs.py  <- Consumer ke HDFS + local
 +-- spark/
-|   +-- analysis.py          <- 6 analisis Spark
+|   +-- analysis.py          <- 6 analisis Spark termasuk GBTRegressor & Evaluasi Model
 +-- dashboard/
     +-- app.py               <- Flask backend
     +-- Dockerfile
     +-- requirements-flask.txt
     +-- templates/index.html <- Dashboard real-time
-    +-- data/                <- Auto-generated saat pipeline jalan
+    +-- data/                <- Auto-generated (spark_results.json memuat matriks ML & Alerts)
+
 ```
 
 ## Docker Services
 
-| Komponen         | Image / Source                  | Port         | Fungsi                                       |
-|------------------|---------------------------------|--------------|----------------------------------------------|
-| Kafka (KRaft)    | confluentinc/cp-kafka:7.6.1     | 9092         | Message broker streaming                     |
-| HDFS NameNode    | bde2020/hadoop-namenode         | 19870, 8020  | Storage HDFS Utama (UI: http://localhost:19870) |
-| HDFS DataNode    | bde2020/hadoop-datanode         | -            | Node penyimpanan data                        |
-| YARN             | bde2020/hadoop-resourcemanager  | 8088         | Resource manager cluster                    |
-| Spark Master     | apache/spark:3.5.0              | 8080, 7077   | Spark Master Node                            |
-| Spark Worker     | apache/spark:3.5.0              | -            | Spark Worker Node                            |
-| Flask Dashboard  | fp-flask (Dockerfile)           | 5002 (Host)  | Dashboard UI Utama (UI: http://localhost:5002) |
-| Kafka Consumer   | fp-consumer (Dockerfile.consumer)| -           | Otomatis flush data ke HDFS & file lokal     |
+| Komponen | Image / Source | Port | Fungsi |
+| --- | --- | --- | --- |
+| Kafka (KRaft) | confluentinc/cp-kafka:7.6.1 | 9092 | Message broker streaming |
+| HDFS NameNode | bde2020/hadoop-namenode | 19870, 8020 | Storage HDFS Utama (UI: http://localhost:19870) |
+| HDFS DataNode | bde2020/hadoop-datanode | - | Node penyimpanan data |
+| YARN | bde2020/hadoop-resourcemanager | 8088 | Resource manager cluster |
+| Spark Master | apache/spark:3.5.0 | 8080, 7077 | Spark Master Node (Scheduler internal running) |
+| Spark Worker | apache/spark:3.5.0 | - | Spark Worker Node |
+| Flask Dashboard | fp-flask (Dockerfile) | 5002 (Host) | Dashboard UI Utama (UI: http://localhost:5002) |
+| Kafka Consumer | fp-consumer (Dockerfile.consumer) | - | Otomatis flush data ke HDFS & file lokal |
 
-## Data Pipeline & Feature Engineering 
-Tiga file di bawah ini diperluas agar menyediakan fitur historis dan sinyal musiman yang dibutuhkan model prediksi dan dashboard.
+## Data Pipeline, Feature Engineering & ML Analytics
 
-`kafka/producer_api.py`
-- Kurs USD/IDR historis 30 hari dari yfinance (window diperluas dari 2d menjadi 35d, diambil sekali saat startup), dengan fallback simulasi kalau `yfinance` gagal diakses.
-- Harga historis 30 hari per komoditas, disimpan sebagai time series rolling (`historis_30h`) di setiap payload.
-- Field turunan untuk fitur model: harga_kemarin (lag_1), `kurs_7d_avg`, `kurs_30d_avg`.
-- Flag musiman berbasis kalender Indonesia: `flag_lebaran` (mencakup Lebaran, Nataru, Idul Adha), `flag_panen` (dua musim panen raya nasional), `flag_impor_ekspor` (bulan-bulan kebijakan impor aktif), beserta label `musim_event`.
+Komponen pipeline data telah diperluas untuk menyediakan fitur historis, sinyal musiman, dan pemodelan prediktif tingkat lanjut.
 
-`kafka/producer_rss.py`
-- Sentiment scoring sederhana berbasis keyword matching: setiap artikel diberi skor +1 (positif, mis. "panen raya", "stok aman"), 0 (netral), atau -1 (negatif, mis. "gagal panen", "kelangkaan"). Saat keyword positif dan negatif sama-sama muncul, skor negatif diprioritaskan karena lebih kritis untuk peringatan dini.
-- Deteksi penyebab dominan per artikel (`penyebab_dominan`): "kurs", "cuaca", "kebijakan", "pasokan", atau "umum", dipakai dashboard untuk menampilkan label penyebab, bukan hanya angka.
-- Setiap payload artikel kini menyertakan `sentiment_score`, `sentiment_label`, dan `penyebab_dominan`.
+### 1. Ingesti Data & Fitur Musiman (`kafka/producer_api.py`)
 
-`kafka/consumer_to_hdfs.py`
-- Struktur penyimpanan HDFS baru yang ramah time series: `/data/pangan/timeseries/{slug_komoditas}/{tanggal}.json`, terpisah dari struktur batch lama yang tetap dipertahankan untuk kompatibilitas.
-- Agregasi harian otomatis per komoditas (harga rata-rata/min/max, kurs rata-rata, flag musiman) yang diperbarui setiap siklus flush.
-- Output lokal baru `dashboard/data/timeseries_{komoditas}.json` berisi array ringkasan 30 hari per komoditas, langsung dapat dibaca dashboard tanpa query ke HDFS.
-`live_summary.json` diperkaya dengan field dari producer revisi (`harga_kemarin`, `kurs_7d_avg`, `kurs_30d_avg`, flag musiman) agar dashboard bisa menampilkan konteks tambahan di panel harga terkini.
+* Kurs USD/IDR historis 35 hari dari `yfinance` diambil saat startup dengan mekanisme *backup simulation* jika API *offline*.
+* Fitur turunan model prediktif dibuat secara dinamis: `harga_kemarin` (lag_1), `kurs_7d_avg`, dan `kurs_30d_avg`.
+* Penyuntikan flag musiman kalender Indonesia: `flag_lebaran`, `flag_panen`, dan `flag_impor_ekspor`.
 
-## Cara Menjalankan
+### 2. Analisis Sentimen Berita Ekonomi (`kafka/producer_rss.py`)
 
-### Prasyarat
-- Docker Desktop (sudah berjalan)
-- RAM minimal 8 GB (direkomendasikan 12-16 GB jika menggunakan WSL2)
+* *Scoring* sentimen otomatis berbasis *keyword matching* (+1 positif, 0 netral, -1 negatif) dari portal berita *real-time*.
+* Ekstraksi `penyebab_dominan` ("kurs", "cuaca", "kebijakan", "pasokan", "umum") untuk kontekstualisasi grafik.
 
-### Step 1 - Masuk folder project
+### 3. Pemodelan Prediktif & Evaluasi ML (`spark/analysis.py`)
 
-Windows PowerShell:
-  cd C:\sem4\big-data\fp
+* **Pipeline Multi-Fitur Advanced (Analisis 5):** Menggunakan **GBTRegressor (Gradient Boosted Trees)** sebagai model utama untuk memproyeksikan harga komoditas pada horizon **t+7, t+14, dan t+30 hari**.
+* **Fitur Pemodelan:** Memanfaatkan `kurs_avg`, `kurs_7d_avg`, `flag_lebaran`, `flag_panen`, `flag_impor_ekspor`, `lag_1`, `sentiment_score` (dari live RSS), dan `lag_7` (jika data historis mencukupi).
+* **Mekanisme Robust Fallback:** Jika data run-time per komoditas mengalami anomali atau gagal melatih pohon keputusan GBT, pipeline otomatis turun (*fallback*) ke **LinearRegression** agar visualisasi dashboard tidak terputus.
+* **Evaluasi Performa Komprehensif:** Setiap iterasi model menghitung metrik **MAE (Mean Absolute Error)** dan **MAPE (Mean Absolute Percentage Error)** secara *real-time* untuk memantau tingkat akurasi prediksi langsung pada struktur data utama.
 
-Kali Linux / WSL:
-  cd /mnt/c/sem4/big-data/fp
+## Web UI Monitoring & Struktur Output JSON
 
-### Step 2 - Jalankan Docker containers
+| Service | URL |
+| --- | --- |
+| Dashboard Utama | http://localhost:5002 |
+| HDFS NameNode | http://localhost:19870 |
+| Spark Master | http://localhost:8080 |
+| YARN | http://localhost:8088 |
 
-Seluruh pipeline (Producers, Kafka, HDFS, Spark, Flask Dashboard, dan Consumer) telah **100% di-Dockerisasi**. Anda hanya perlu menjalankan satu perintah untuk memulai semuanya:
+File output utama `/dashboard/data/spark_results.json` distrukturkan dengan skema berikut untuk konsumsi *frontend*:
 
-  docker compose up -d
+```json
+{
+  "generated_at": "ISO-Timestamp",
+  "volatilitas": [...],
+  "korelasi_kurs": [...],
+  "heatmap": [...],
+  "berita": [...],
+  "prediksi": [
+    {
+      "komoditas": "Daging Sapi",
+      "model": "GBT(fallback)",
+      "prediksi_7h": 157062,
+      "prediksi_14h": 157062,
+      "prediksi_30h": 157062,
+      "mae": 767.41,
+      "mape_pct": 0.49,
+      "alerts": { ... }
+    }
+  ],
+  "alerts": [
+    {
+      "komoditas": "Cabai Rawit Merah",
+      "horizon": "t7",
+      "hari_ke": 7,
+      "prediksi": 151793,
+      "threshold_waspada": 120000,
+      "threshold_bahaya": 140000,
+      "status": "BAHAYA",
+      "harga_saat_ini": 110000
+    }
+  ],
+  "evaluasi_model": {
+    "n_komoditas_diproses": 11,
+    "rata_rata_mae": 7824.12,
+    "rata_rata_mape_pct": 11.09,
+    "detail_per_komoditas": [...]
+  },
+  "simulasi_subsidi": [...]
+}
 
-Tunggu semua container running dan healthy (sekitar 30-60 detik):
+```
 
-  docker compose ps
-
-*(Catatan: Semua produser data real-time, consumer, Spark scheduler, dan dashboard Flask akan berjalan otomatis di latar belakang. Saat laptop dimatikan dan dinyalakan kembali, Docker Desktop akan otomatis memulai ulang seluruh layanan ini).*
-
-### Step 3 - Buka Dashboard
-
-Buka browser Anda di alamat berikut untuk melihat dashboard visualisasi utama:
-👉 **http://localhost:5002**
-
-*(Jika chart korelasi/volatilitas/heatmap masih kosong di awal, itu karena Spark membutuhkan minimal beberapa batch data terkumpul di HDFS. Biarkan pipeline berjalan selama 1-2 menit).*
-
-### Step 7 - Jalankan Spark Analysis (Otomatis / Manual)
-
-**Otomatis (Sangat Direkomendasikan):**
-Sistem telah dilengkapi dengan **Auto-Scheduler** di dalam container Spark Master yang otomatis mengeksekusi Spark-submit setiap **2 menit sekali**. Anda cukup membiarkan pipeline berjalan, dan grafik pada dashboard akan diperbarui secara otomatis.
-
-**Manual (Opsional - Jika ingin langsung memicu update saat ini juga):**
-Jika Anda ingin melihat hasil analisis secara instan tanpa menunggu scheduler berjalan, jalankan perintah ini di PowerShell/Terminal:
-
-  docker exec -e OUTPUT_DIR=/data/output -e LOCAL_INPUT_DIR=/data/output spark_master_pangan /opt/spark/bin/spark-submit --master spark://spark-master:7077 /spark-apps/analysis.py
-
-### Menghentikan Pipeline
-
-  docker compose down
-  docker compose down -v   <- hapus data volume (reset total)
-
-## Web UI Monitoring
-
-| Service          | URL                     |
-|------------------|-------------------------|
-| Dashboard Utama  | http://localhost:5002   |
-| HDFS NameNode    | http://localhost:19870  |
-| Spark Master     | http://localhost:8080   |
-| YARN             | http://localhost:8088   |
-
-## Fitur Unggulan (Pembeda dari KursAlert)
+## Fitur Unggulan (Pembeda Utama dari KursAlert)
 
 ### 1. Heatmap Korelasi Antar Komoditas
-Matrix korelasi harga semua komoditas menggunakan Spark pivot + stat.corr.
-Melihat komoditas mana yang pergerakannya saling terkait.
+
+Matriks korelasi harga semua komoditas menggunakan Spark pivot + `stat.corr` untuk melihat keterkaitan pergerakan antar pangan secara makro.
 
 ### 2. Simulasi Dampak Kebijakan Subsidi
-Menghitung dampak subsidi 10% per komoditas:
-- Keluarga miskin yang terbantu: 26,36 juta jiwa (BPS 2024)
-- Dampak terhadap angka inflasi (percentage point)
-- Total anggaran yang dibutuhkan per komoditas
 
-Kedua fitur ini TIDAK ADA di KursAlert (mereka fokus UMKM, bukan kebijakan pemerintah).
+Menghitung dampak finansial intervensi subsidi 10% terhadap anggaran negara, jumlah keluarga miskin yang terbantu (26,36 juta jiwa berdasarkan BPS 2024), dan estimasi penurunan angka inflasi pangan.
+
+### 3. Early Warning System Berbasis Ambang Batas Statistik (Baru)
+
+Sistem tidak hanya memprediksi nominal harga ke depan, tetapi juga mengkalkulasi ambang batas kerawanan secara dinamis per komoditas menggunakan rumus:
+
+* **Waspada:** $\text{Mean} + 1.5 \times \text{StdDev}$
+* **Bahaya:** $\text{Mean} + 2.0 \times \text{StdDev}$
+
+Jika angka proyeksi menembus batas tersebut, sistem secara otomatis melabeli status menjadi `WASPADA` atau `BAHAYA` dan melemparnya ke dalam *array* peringatan dini global.
+
+### 4. Tracker Transparansi Akurasi Model (Baru)
+
+Menampilkan metrik performa MAE dan rata-rata MAPE secara transparan di dashboard (misalnya rata-rata MAPE saat ini berada di kisaran ~11.09%), memvalidasi keandalan prediksi sebelum digunakan oleh pengambil keputusan kebijakan.
 
 ## Pembenaran & Optimalisasi Pipeline (Update Juni 2026)
 
-Untuk menjamin kelancaran presentasi dan keandalan sistem saat dijalankan dalam waktu lama, beberapa optimalisasi berikut telah diimplementasikan:
-
 1. **Self-Healing Consumer & Earliest Offset**:
-   - Ditambahkan mekanisme *reconnection loop* di thread Kafka consumer untuk mencegah *crash* saat broker Kafka mengalami *restart* mendadak atau *network drops*.
-   - Offset strategy diubah dari `latest` ke `earliest` agar consumer dapat menarik semua pesan historis yang sempat tertinggal saat consumer dalam kondisi *offline*.
+Thread Kafka consumer dilengkapi dengan *reconnection loop* untuk menahan kendala *network drops* mendadak dan menggunakan strategi `earliest` offset agar data historis pasca-*downtime* tidak hilang.
+2. **Sanitasi Pivot Kolom Eksplisit di Spark**:
+Pembersihan data `None`/null secara ketat sebelum proses agregasi korelasi. Struktur pivot menggunakan daftar komoditas eksplisit (`komoditas_list`) untuk menghindari fenomena hilangnya baris data secara menyeluruh setelah fungsi `.dropna()`.
+3. **Mesin Prediksi GBT Robust dengan Fallback Linear**:
+Jika sebaran data pada time series lokal atau HDFS sangat minim atau tidak berdistribusi normal yang memicu kegagalan latih pada pohon keputusan GBT, eksekusi Spark dilindungi oleh blok *multi-try* yang otomatis berpindah ke model regresi linier biasa.
+4. **Sinkronisasi Volume & Keamanan I/O Lingkungan Terisolasi**:
+Untuk mengatasi pembatasan hak akses sistem berkas kontainer Docker (`unlinkat/open permission denied`) pada *environment* Cloud Shell, alur pembaruan dashboard dipindahkan menggunakan skema penyalinan administratif berkala (`sudo docker cp` diikuti penyesuaian kepemilikan lewat `chown`), yang menjamin kelancaran pembacaan data *real-time*.
 
-2. **Penyaringan & Pivot Kolom Eksplisit di Spark**:
-   - Menambahkan sanitasi otomatis untuk membuang baris data dengan komoditas bernilai `None`/null di Spark.
-   - Pivot data di Spark diubah menggunakan parameter eksplisit list komoditas (`komoditas_list`) untuk mencegah terbentuknya kolom `null` virtual yang berujung pada hilangnya seluruh baris data setelah pemanggilan `.dropna()`. Heatmap korelasi kini dijamin selalu muncul.
+## Cara Menjalankan Manual & Troubleshooting
 
-3. **Penyelarasan Zona Waktu & Aliran Berita RSS Asli**:
-   - Seluruh container dikonfigurasi menggunakan zona waktu lokal `Asia/Jakarta` (`TZ: Asia/Jakarta`) sehingga pencatatan log, waktu pengambilan data, dan hasil analisis Spark sinkron dengan waktu WIB host.
-   - Aliran berita menyajikan 100% berita real-time asli dari portal media ekonomi (Bisnis.com, CNBC, Detik Finance, Antara) tanpa artikel simulasi, dan dashboard menampilkan waktu publikasi berita asli.
+### Trigger Jalur Spark Manual via Kontainer
 
-4. **Rolling History Buffer di Consumer**:
-   - Mengubah mekanisme penyimpanan JSON lokal di consumer menjadi *rolling history buffer*. File lokal tidak lagi dioverwrite mentah-mentah melainkan digabungkan, disortir berdasarkan timestamp terbaru, dan dibatasi (30 artikel terbaru untuk berita, 200 entri terbaru untuk harga). Hal ini mencegah artikel lama terhapus dari tampilan visual saat flush HDFS berjalan.
+Jika Anda ingin memaksa pembaruan matriks ML dan perhitungan *alerts* saat ini juga tanpa menunggu penjadwalan otomatis 2 menit, jalankan urutan perintah ini:
 
-## Troubleshooting
+```bash
+# Salin kode analisis terbaru ke dalam master node Spark
+docker cp spark/analysis.py spark_master_pangan:/spark-apps/analysis.py
 
-Kafka tidak bisa dihubungi:
-  docker compose logs kafka --tail=30
-  python scripts/init_infrastructure.py
+# Eksekusi pipeline submit Spark ML
+docker exec -it spark_master_pangan /opt/spark/bin/spark-submit --master spark://spark-master:7077 /spark-apps/analysis.py
 
-HDFS error:
-  docker compose restart namenode datanode
+# Tarik data json hasil pemodelan kembali ke Cloud Shell
+sudo docker cp spark_master_pangan:/dashboard/data/spark_results.json dashboard/data/spark_results.json
+sudo chown $(whoami):$(whoami) dashboard/data/spark_results.json
 
-Dashboard kosong:
-  Tunggu producer berjalan minimal 1 siklus, lalu refresh browser.
+```
 
-Error import Python (merah di editor):
-  pip install -r requirements.txt
+### Menghentikan Seluruh Sistem
 
-Port conflict - pastikan port ini bebas:
-  9092, 19870, 8020, 8088, 8080, 7077, 4040, 5002
+```bash
+docker compose down
+docker compose down -v   <- Reset total seluruh volume HDFS dan Kafka
 
-## Sumber Data
+```
 
-- Kurs USD/IDR: yfinance USDIDR=X (real-time)
-- Harga Pangan: hargapangan.id PIHPS Bank Indonesia (scraping)
-- Backup Harga: panelharga.badanpangan.go.id
-- Berita: RSS Bisnis.com, Kompas Money, CNBC Indonesia, Detik Finance, Antara
-- Bobot Pengeluaran: BPS Susenas 2023
-- Data Kemiskinan: BPS 2024
-
-## Mata Kuliah
-
-Big Data - Semester 4
-Topik: Analisis Dampak Kurs USD/IDR terhadap Harga Pangan Indonesia
+---
