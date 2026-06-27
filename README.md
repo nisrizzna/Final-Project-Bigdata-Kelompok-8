@@ -1,5 +1,12 @@
 # Big Data Analytics - Dampak Kurs Dollar terhadap Harga Pangan Indonesia
 
+|Nama | NRP |
+|-----|-----|
+|Revalina Erica P. | 5027241007|
+|Syifa Nurul A.| 5027241019|
+|Azaria Raissa M.|5027241043|
+|Nisrina Bilqis| 5027241054|
+
 Stack: Kafka, HDFS, Spark, Flask | Data: Real-Time | Deploy: Docker | Repository: Kelompok 8
 
 ## Latar Belakang
