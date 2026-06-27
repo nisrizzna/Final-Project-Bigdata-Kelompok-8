@@ -68,6 +68,10 @@ services:
       - hadoop.env
     volumes:
       - namenode_data:/hadoop/dfs/name
+    ulimits:                    
+      nofile:                 
+        soft: 65536            
+        hard: 65536           
     healthcheck:
       test: ["CMD", "curl", "-sf", "http://localhost:9870/"]
       interval: 30s
@@ -83,6 +87,13 @@ services:
     image: bde2020/hadoop-datanode:2.0.0-hadoop3.2.1-java8
     container_name: datanode_pangan
     hostname: datanode
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      nproc:
+        soft: 65536
+        hard: 65536
     networks:
       - pangan-net
     depends_on:
@@ -95,6 +106,7 @@ services:
     volumes:
       - datanode_data:/hadoop/dfs/data
     restart: unless-stopped
+    
 
   # ════════════════════════════════════════════════════════
   # HADOOP ResourceManager (YARN)
@@ -104,6 +116,13 @@ services:
     image: bde2020/hadoop-resourcemanager:2.0.0-hadoop3.2.1-java8
     container_name: resourcemanager_pangan
     hostname: resourcemanager
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+      nproc:
+        soft: 65536
+        hard: 65536
     networks:
       - pangan-net
     ports:
@@ -188,6 +207,8 @@ services:
       kafka:
         condition: service_healthy
     restart: unless-stopped
+    env_file:
+      - .env
 
   # ════════════════════════════════════════════════════════
   # KAFKA CONSUMER TO HDFS

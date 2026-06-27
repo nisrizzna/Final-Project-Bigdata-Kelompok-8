@@ -3,29 +3,26 @@
 FLASK DASHBOARD — Big Data Analytics Harga Pangan
 ===================================================
 Endpoint:
-  GET /                  → halaman utama dashboard
-  GET /api/data          → semua data (Spark + live harga + RSS)
-  GET /api/kurs          → kurs USD/IDR real-time (yfinance)
-  GET /api/harga         → harga pangan terkini
-  GET /api/berita        → berita RSS terbaru
-  GET /api/spark         → hasil analisis Spark
-  GET /api/timeseries    → time series 30 hari per komoditas
-  GET /api/rekomendasi   → rekomendasi intervensi dari LLM (Claude/Gemini/fallback)
-  GET /api/health        → cek status semua komponen
+  GET /              → halaman utama dashboard
+  GET /api/data      → semua data (Spark + live harga + RSS)
+  GET /api/kurs      → kurs USD/IDR real-time (yfinance)
+  GET /api/harga     → harga pangan terkini
+  GET /api/berita    → berita RSS terbaru
+  GET /api/spark     → hasil analisis Spark
+  GET /api/health    → cek status semua komponen
+  GET /api/rekomendasi → rekomendasi LLM berbasis alert prediksi [BARU]
+  GET /api/timeseries/<slug> → data time series 30 hari per komoditas [BARU]
 
-Env vars:
-  ANTHROPIC_API_KEY  — Claude API key (primary LLM)
-  GEMINI_API_KEY     — Gemini API key (fallback LLM)
+Jalankan:
+  python dashboard/app.py
 """
 
-import json, logging, os, time
+import json, logging, os, time, requests
 from pathlib import Path
 from datetime import datetime
-from flask import Flask, jsonify, render_template, abort, Response
+from flask import Flask, jsonify, render_template, abort
 from flask_cors import CORS
-from werkzeug.exceptions import HTTPException
 import yfinance as yf
-import requests
 
 try:
     from dotenv import load_dotenv
@@ -44,25 +41,11 @@ log = logging.getLogger(__name__)
 DATA_DIR = Path(__file__).parent / "data"
 DATA_DIR.mkdir(exist_ok=True)
 
-# ── Pastikan semua error di /api/* selalu return JSON, bukan HTML ──
-@app.errorhandler(Exception)
-def handle_exception(e):
-    if isinstance(e, HTTPException):
-        return jsonify({"error": e.description, "code": e.code}), e.code
-    log.error(f"Unhandled: {e}")
-    return jsonify({"error": str(e)}), 500
+# ─── Cache ───────────────────────────────────────────────────
+_kurs_cache        = {"nilai": None, "updated_at": None}
+_rekomendasi_cache = {"data": None, "updated_at": None}
+REKOMENDASI_TTL    = 1800   # 30 menit
 
-# ── Cache kurs (5 menit) ──────────────────────────────────────
-_kurs_cache = {"nilai": None, "updated_at": None}
-
-# ── Cache rekomendasi LLM (30 menit) ─────────────────────────
-_rek_cache: dict = {"text": None, "ts": 0}
-REK_TTL = 30 * 60  # detik
-
-
-# ════════════════════════════════════════════════════════
-# HELPERS
-# ════════════════════════════════════════════════════════
 
 def _load_json(filename: str) -> dict | list | None:
     path = DATA_DIR / filename
@@ -82,6 +65,7 @@ def _fetch_kurs_live() -> dict:
     if (cached["nilai"] and cached["updated_at"] and
             (now - cached["updated_at"]).seconds < 300):
         return {"nilai": cached["nilai"], "sumber": "cache", "updated_at": cached["updated_at"].isoformat()}
+
     try:
         ticker = yf.Ticker("USDIDR=X")
         hist   = ticker.history(period="2d", interval="1h")
@@ -99,88 +83,72 @@ def _fetch_kurs_live() -> dict:
 
 
 # ════════════════════════════════════════════════════════
-# REKOMENDASI LLM
+# LLM INTEGRATION — Claude → Gemini → Rule-Based Fallback
 # ════════════════════════════════════════════════════════
 
-def _build_prompt(alerts: list, spark: dict, berita_list: list) -> str:
-    """Susun prompt untuk LLM berisi konteks alert + berita + prediksi."""
-    if not alerts:
-        return ""
+PENYEBAB_LABEL = {
+    "kurs":      "depresiasi rupiah terhadap USD",
+    "cuaca":     "anomali cuaca / bencana alam",
+    "kebijakan": "perubahan kebijakan impor/ekspor",
+    "pasokan":   "gangguan rantai pasokan",
+    "musiman":   "faktor musiman (lebaran/panen/dll)",
+    "lainnya":   "faktor eksternal tidak teridentifikasi",
+}
 
-    # Ambil prediksi per komoditas yang alert
-    prediksi_map: dict = {}
-    for p in spark.get("prediksi", []):
-        prediksi_map[p["komoditas"]] = p
+INTERVENSI_TEMPLATE = {
+    "Beras":       "percepat realisasi impor beras, aktifkan operasi pasar Bulog",
+    "Jagung":      "stabilkan harga pakan ternak, koordinasi dengan Bulog",
+    "Kedelai":     "dorong impor kedelai, subsidi petani lokal",
+    "Daging Sapi": "buka keran impor sapi bakalan, kendalikan RPH swasta",
+    "Daging Ayam": "stabilkan harga DOC, subsidi pakan unggas",
+    "Telur Ayam":  "intervensi harga pakan, jaga rantai distribusi",
+    "Minyak":      "pantau distribusi minyak goreng, tindak penimbunan",
+    "Gula":        "tambah kuota impor raw sugar, libatkan PTPN",
+    "Bawang":      "percepat realisasi impor, dorong off-season farming",
+    "Cabai":       "stabilisasi distribusi, dukung greenhouse farming",
+    "Tepung":      "jaga impor gandum, subsidi tepung industri UMKM",
+}
 
-    # Kumpulkan berita per komoditas alert (maks 4 per komoditas)
-    alert_komoditas = {a["komoditas"] for a in alerts}
-    berita_relevan: dict[str, list] = {k: [] for k in alert_komoditas}
-    for b in sorted(berita_list, key=lambda x: x.get("timestamp", ""), reverse=True):
-        tags = b.get("komoditas_tag", [])
-        if isinstance(tags, str):
-            tags = [tags]
-        for k in alert_komoditas:
-            if any(k.lower() in (t.lower() if isinstance(t, str) else "") for t in tags) \
-               or k.lower() in b.get("judul", "").lower():
-                if len(berita_relevan[k]) < 4:
-                    berita_relevan[k].append(b)
 
+def _build_prompt(alerts_aktif: list, berita_relevan: dict, kurs: int) -> str:
+    """Susun prompt ke LLM berdasarkan alert aktif dan berita relevan."""
     lines = [
-        "Kamu adalah analis kebijakan pangan senior Indonesia.",
-        "Berdasarkan data Spark Big Data berikut, berikan rekomendasi intervensi pemerintah yang SPESIFIK dan ACTIONABLE.",
+        "Kamu adalah analis kebijakan pangan Indonesia.",
+        f"Kurs USD/IDR saat ini: Rp{kurs:,}.",
         "",
-        f"Tanggal analisis: {datetime.now().strftime('%d %B %Y %H:%M WIB')}",
+        "Berikut komoditas yang diprediksi melewati batas aman dalam 7–30 hari ke depan:",
         "",
-        "=== ALERT KOMODITAS BERMASALAH ===",
     ]
+    for a in alerts_aktif:
+        pct_naik = round((a['prediksi'] - a['harga_saat_ini']) / max(a['harga_saat_ini'], 1) * 100, 1)
+        lines.append(
+            f"• {a['komoditas']} ({a['status']}): harga saat ini Rp{a['harga_saat_ini']:,}, "
+            f"prediksi hari ke-{a['hari_ke']}: Rp{a['prediksi']:,} (+{pct_naik}%)"
+        )
+        brt = berita_relevan.get(a['komoditas'], [])
+        if brt:
+            penyebab = brt[0].get('penyebab_dominan', 'lainnya')
+            lines.append(f"  Penyebab terdeteksi: {PENYEBAB_LABEL.get(penyebab, penyebab)}")
+            for b in brt[:2]:
+                lines.append(f"  - [Berita] {b.get('judul','')}")
+        lines.append("")
 
-    for a in alerts:
-        k = a["komoditas"]
-        p = prediksi_map.get(k, {})
-        pct_kenaikan = 0
-        if p.get("harga_saat_ini", 0) > 0 and a.get("prediksi", 0) > 0:
-            pct_kenaikan = ((a["prediksi"] - p["harga_saat_ini"]) / p["harga_saat_ini"]) * 100
-
-        lines.append(f"\n[{a['status']}] {k}")
-        lines.append(f"  - Harga saat ini  : Rp{p.get('harga_saat_ini', 0):,.0f}")
-        lines.append(f"  - Prediksi {a.get('hari_ke', '?')} hari : Rp{a.get('prediksi', 0):,.0f} "
-                     f"(+{pct_kenaikan:.1f}%)")
-        if p.get("prediksi_7h"):
-            lines.append(f"  - Prediksi 7h/14h/30h: "
-                         f"Rp{p.get('prediksi_7h',0):,.0f} / Rp{p.get('prediksi_14h',0):,.0f} / Rp{p.get('prediksi_30h',0):,.0f}")
-        lines.append(f"  - MAE model       : {p.get('mae', 0):,.0f} | MAPE: {p.get('mape_pct', 0):.1f}%")
-
-        berita_k = berita_relevan.get(k, [])
-        if berita_k:
-            lines.append(f"  - Berita terkait  :")
-            for b in berita_k:
-                sent  = b.get("sentiment_label", "")
-                sebab = b.get("penyebab_dominan", "")
-                lines.append(f"      [{sent}|{sebab}] {b.get('judul', '')[:90]}")
-
-    kurs = spark.get("korelasi_kurs", [{}])[0].get("kurs_saat_ini", "N/A") if spark.get("korelasi_kurs") else "N/A"
     lines += [
-        "",
-        f"=== KONTEKS MAKRO ===",
-        f"Kurs USD/IDR saat ini: Rp{kurs}",
-        "",
-        "=== INSTRUKSI OUTPUT ===",
-        "Tulis laporan singkat dalam Bahasa Indonesia dengan format:",
-        "1. Ringkasan situasi (2-3 kalimat)",
-        "2. Untuk SETIAP komoditas bermasalah: analisis penyebab + rekomendasi intervensi spesifik (volume, instansi, waktu)",
-        "3. Rekomendasi lintas-komoditas jika ada pola umum",
-        "Gunakan angka konkret. Maksimal 400 kata.",
+        "Berikan analisis singkat (3–5 kalimat) dan rekomendasi intervensi kebijakan yang spesifik, actionable,",
+        "dan terukur untuk masing-masing komoditas yang berstatus WASPADA atau BAHAYA.",
+        "Tulis dalam Bahasa Indonesia yang formal dan ringkas.",
+        "Format: untuk setiap komoditas, tulis satu paragraf terpisah.",
     ]
     return "\n".join(lines)
 
 
 def _call_claude(prompt: str) -> str | None:
-    """Panggil Claude API. Return teks atau None jika gagal."""
+    """Panggil Claude API (claude-sonnet-4-6). Return teks atau None jika gagal."""
     api_key = os.environ.get("ANTHROPIC_API_KEY", "")
     if not api_key:
         return None
     try:
-        resp = requests.post(
+        r = requests.post(
             "https://api.anthropic.com/v1/messages",
             headers={
                 "x-api-key": api_key,
@@ -194,158 +162,134 @@ def _call_claude(prompt: str) -> str | None:
             },
             timeout=30,
         )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["content"][0]["text"]
+        if r.status_code == 200:
+            data = r.json()
+            return data["content"][0]["text"].strip()
+        log.warning(f"Claude API error {r.status_code}: {r.text[:200]}")
     except Exception as e:
-        log.warning(f"Claude API gagal: {e}")
-        return None
+        log.warning(f"Claude gagal: {e}")
+    return None
 
 
 def _call_gemini(prompt: str) -> str | None:
-    """Panggil Gemini API sebagai fallback. Return teks atau None jika gagal."""
+    """Fallback ke Gemini API. Return teks atau None jika gagal."""
     api_key = os.environ.get("GEMINI_API_KEY", "")
     if not api_key:
         return None
     try:
-        url = (
-            f"https://generativelanguage.googleapis.com/v1beta/models/"
-            f"gemini-1.5-flash:generateContent?key={api_key}"
-        )
-        resp = requests.post(
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
+        r = requests.post(
             url,
             json={"contents": [{"parts": [{"text": prompt}]}]},
             timeout=30,
         )
-        resp.raise_for_status()
-        data = resp.json()
-        return data["candidates"][0]["content"]["parts"][0]["text"]
+        if r.status_code == 200:
+            data = r.json()
+            return data["candidates"][0]["content"]["parts"][0]["text"].strip()
+        log.warning(f"Gemini API error {r.status_code}: {r.text[:200]}")
     except Exception as e:
-        log.warning(f"Gemini API gagal: {e}")
-        return None
+        log.warning(f"Gemini gagal: {e}")
+    return None
 
 
-def _rule_based_rekomendasi(alerts: list, spark: dict) -> str:
-    """
-    Fallback rule-based: hasilkan rekomendasi spesifik tanpa LLM.
-    Dipakai saat kedua API key kosong atau gagal.
-    """
-    if not alerts:
-        return "Tidak ada komoditas dalam status WASPADA atau BAHAYA saat ini."
+def _rule_based_rekomendasi(alerts_aktif: list, berita_relevan: dict, kurs: int) -> str:
+    """Rule-based fallback — tidak perlu API key, selalu berhasil."""
+    if not alerts_aktif:
+        return "Semua komoditas strategis dalam kondisi AMAN. Tidak diperlukan intervensi mendesak saat ini."
 
-    prediksi_map: dict = {p["komoditas"]: p for p in spark.get("prediksi", [])}
-
-    penyebab_teks = {
-        "kurs":      "depresiasi nilai tukar Rupiah terhadap USD",
-        "cuaca":     "anomali cuaca / gangguan iklim",
-        "kebijakan": "kebijakan impor/ekspor yang belum optimal",
-        "pasokan":   "gangguan rantai pasokan domestik",
-        "umum":      "kombinasi tekanan makroekonomi",
-    }
-
-    intervensi_map = {
-        "Beras":     "Percepat realisasi impor beras 500 ribu ton via Bulog; aktifkan Operasi Pasar di 5 provinsi defisit.",
-        "Cabai":     "Dorong distribusi hortikultura lintas provinsi; aktifkan cold storage Kementan untuk mengurangi susut pasca-panen.",
-        "Gula":      "Percepat penerbitan izin impor gula mentah; monitor distribusi gula BUMN ke pasar tradisional.",
-        "Minyak":    "Optimalkan penyaluran minyak goreng subsidi; tindak pelaku penimbunan lewat Satgas Pangan.",
-        "Daging":    "Realisasikan kuota impor daging sapi beku; intensifkan operasi pasar Bulog dan pengawasan RPH.",
-        "Kedelai":   "Percepat impor kedelai untuk perajin tahu/tempe; pertimbangkan subsidi langsung 14 juta perajin.",
-        "Telur":     "Stabilisasi harga pakan unggas (jagung/SBM); aktifkan intervensi harga acuan Kemendag.",
-        "Jagung":    "Serap hasil panen domestik melalui Bulog; tunda izin ekspor jagung sampai stok aman.",
-        "Tepung":    "Monitor stok gandum nasional; koordinasi dengan importir untuk menjaga buffer 3 bulan.",
-        "Ikan":      "Fasilitasi distribusi ikan tangkap dari sentra ke daerah defisit; subsidi BBM nelayan.",
-        "Ayam":      "Kendalikan harga DOC; awasi integrasi vertikal peternakan besar agar tidak menekan peternak kecil.",
-    }
-
-    lines = [
-        f"📊 **Laporan Rekomendasi Intervensi Pangan — {datetime.now().strftime('%d %B %Y %H:%M WIB')}**",
-        "",
-        f"**Ringkasan Situasi:** Terdapat {len(alerts)} sinyal peringatan pada komoditas strategis.",
-        "Sistem mendeteksi tekanan harga yang berpotensi berdampak pada daya beli masyarakat.",
-        "",
+    paragraphs = [
+        f"ANALISIS OTOMATIS — Kurs USD/IDR: Rp{kurs:,}\n"
     ]
+    for a in alerts_aktif:
+        pct  = round((a['prediksi'] - a['harga_saat_ini']) / max(a['harga_saat_ini'], 1) * 100, 1)
+        brt  = berita_relevan.get(a['komoditas'], [])
+        penyebab_raw = brt[0].get('penyebab_dominan', 'lainnya') if brt else 'lainnya'
+        penyebab     = PENYEBAB_LABEL.get(penyebab_raw, penyebab_raw)
+        n_berita     = len(brt)
 
-    for a in alerts:
-        k   = a["komoditas"]
-        p   = prediksi_map.get(k, {})
-        harga_saat = p.get("harga_saat_ini", 0)
-        harga_pred = a.get("prediksi", 0)
-        pct = ((harga_pred - harga_saat) / harga_saat * 100) if harga_saat > 0 else 0
-        status_emoji = "🔴" if a["status"] == "BAHAYA" else "🟡"
+        # exact match dulu, baru partial match — hindari "Daging Sapi" match ke "Daging Ayam"
+        komoditas_key = next((k for k in INTERVENSI_TEMPLATE if k.lower() == a['komoditas'].lower()), None) or \
+                        next((k for k in INTERVENSI_TEMPLATE if k.lower() in a['komoditas'].lower()), None)
+        intervensi    = INTERVENSI_TEMPLATE.get(komoditas_key, "lakukan operasi pasar dan koordinasi lintas K/L terkait")
 
-        # Cari intervensi yang paling cocok
-        intervensi = next(
-            (v for keyword, v in intervensi_map.items() if keyword.lower() in k.lower()),
-            f"Koordinasi Kemendag-Bulog untuk menjaga harga {k} di bawah HET."
+        em = "BAHAYA" if a['status'] == "BAHAYA" else "WASPADA"
+        paragraphs.append(
+            f"[{em}] {a['komoditas']}\n"
+            f"Harga saat ini: Rp{a['harga_saat_ini']:,} → Prediksi hari ke-{a['hari_ke']}: Rp{a['prediksi']:,} ({'+' if pct>=0 else ''}{pct}%)\n"
+            f"Penyebab: {penyebab}"
+            + (f" ({n_berita} artikel berita terkait)" if n_berita else "") + "\n"
+            f"Rekomendasi: {intervensi}."
         )
-
-        lines += [
-            f"{status_emoji} **{k}** [{a['status']}]",
-            f"  • Prediksi {a.get('hari_ke','?')} hari ke depan: Rp{harga_pred:,.0f} "
-            f"(+{pct:.1f}% dari Rp{harga_saat:,.0f})",
-            f"  • Rekomendasi: {intervensi}",
-            "",
-        ]
-
-    lines += [
-        "**Rekomendasi Lintas-Komoditas:**",
-        "• Aktifkan Satgas Pangan Nasional untuk pemantauan harian di pasar-pasar induk utama.",
-        "• Koordinasi Kemenkeu untuk relaksasi tarif impor sementara pada komoditas WASPADA/BAHAYA.",
-        "• Percepat penyaluran dana BPNT agar daya beli rumah tangga miskin tetap terjaga.",
-    ]
-
-    return "\n".join(lines)
+    return "\n\n".join(paragraphs)
 
 
-def _get_rekomendasi(force_refresh: bool = False) -> dict:
-    """Ambil rekomendasi: dari cache → LLM → fallback rule-based."""
-    now_ts = time.time()
-    if not force_refresh and _rek_cache["text"] and (now_ts - _rek_cache["ts"]) < REK_TTL:
-        return {
-            "rekomendasi": _rek_cache["text"],
-            "sumber":      _rek_cache.get("sumber", "cache"),
-            "cached_at":   datetime.fromtimestamp(_rek_cache["ts"]).isoformat(),
-            "cache_ttl_s": int(REK_TTL - (now_ts - _rek_cache["ts"])),
-        }
+def _generate_rekomendasi() -> dict:
+    """Orkestrasi: baca data → build prompt → Claude → Gemini → rule-based."""
+    spark  = _load_json("spark_results.json") or {}
+    rss    = _load_json("live_rss.json") or []
+    kurs   = _kurs_cache.get("nilai") or 18_100
 
-    spark      = _load_json("spark_results.json") or {}
-    berita_raw = _load_json("live_rss.json") or []
+    prediksi_list = spark.get("prediksi", [])
 
-    alerts = [a for a in spark.get("alerts", []) if a.get("status") in ("WASPADA", "BAHAYA")]
+    # Kumpulkan alert — 1 entri per komoditas, ambil horizon terpendek yang alert
+    alerts_aktif = []
+    for item in prediksi_list:
+        komoditas    = item.get("komoditas", "")
+        harga_skrg   = item.get("harga_saat_ini", 0)
+        alerts_spark = item.get("alerts", {})
+        for key in ("t7", "t14", "t30"):
+            al = alerts_spark.get(key, {})
+            if al.get("status") in ("WASPADA", "BAHAYA"):
+                alerts_aktif.append({
+                    "komoditas":      komoditas,
+                    "status":         al["status"],
+                    "hari_ke":        al["hari_ke"],
+                    "prediksi":       round(al["prediksi"]),
+                    "harga_saat_ini": round(harga_skrg),
+                    "threshold":      round(al.get("threshold_waspada", 0)),
+                })
+                break  # ambil horizon terpendek saja, stop
+    alerts_aktif = alerts_aktif[:7]  # maksimal 7 komoditas di prompt
 
-    if not alerts:
-        teks   = "Semua komoditas saat ini dalam status AMAN. Tidak ada rekomendasi intervensi yang diperlukan."
-        sumber = "no-alert"
+    # Kumpulkan berita relevan per komoditas
+    berita_relevan = {}
+    for a in alerts_aktif:
+        nama_lower = a["komoditas"].lower()
+        cocok = [
+            b for b in rss
+            if nama_lower in str(b.get("komoditas_tag", [])).lower()
+            or nama_lower in b.get("judul", "").lower()
+        ][:5]
+        berita_relevan[a["komoditas"]] = cocok
+
+    # Tentukan sumber LLM
+    if not alerts_aktif:
+        teks   = "✅ Semua komoditas strategis saat ini berstatus AMAN berdasarkan prediksi Spark MLlib. Tidak diperlukan intervensi kebijakan mendesak."
+        sumber = "rule-based"
     else:
-        prompt = _build_prompt(alerts, spark, berita_raw)
+        prompt = _build_prompt(alerts_aktif, berita_relevan, kurs)
         teks   = _call_claude(prompt)
-        sumber = "claude"
-
+        sumber = "Claude (claude-sonnet-4-6)"
         if not teks:
             teks   = _call_gemini(prompt)
-            sumber = "gemini"
-
+            sumber = "Gemini (gemini-2.0-flash)"
         if not teks:
-            teks   = _rule_based_rekomendasi(alerts, spark)
-            sumber = "rule-based"
+            teks   = _rule_based_rekomendasi(alerts_aktif, berita_relevan, kurs)
+            sumber = "rule-based (offline)"
 
-    _rek_cache["text"]   = teks
-    _rek_cache["ts"]     = now_ts
-    _rek_cache["sumber"] = sumber
-
+    log.info(f"Rekomendasi dihasilkan via {sumber} — {len(alerts_aktif)} alert aktif")
     return {
-        "rekomendasi": teks,
-        "sumber":      sumber,
-        "cached_at":   datetime.fromtimestamp(now_ts).isoformat(),
-        "cache_ttl_s": int(REK_TTL),
-        "n_alerts":    len(alerts),
+        "rekomendasi":  teks,
+        "sumber_llm":   sumber,
+        "jumlah_alert": len(alerts_aktif),
+        "alerts_aktif": alerts_aktif,
+        "generated_at": datetime.now().isoformat(),
     }
 
 
 # ════════════════════════════════════════════════════════
 # ROUTES
 # ════════════════════════════════════════════════════════
-
 @app.route("/")
 def index():
     return render_template("index.html")
@@ -360,7 +304,7 @@ def api_kurs():
 def api_harga():
     summary = _load_json("live_summary.json")
     if not summary:
-        return jsonify({"error": "Data harga belum tersedia.", "data": {}}), 200
+        return jsonify({"error": "Data harga belum tersedia. Jalankan producer + consumer."}), 503
     return jsonify(summary)
 
 
@@ -377,43 +321,43 @@ def api_berita():
 def api_spark():
     spark = _load_json("spark_results.json")
     if not spark:
-        return jsonify({"error": "Hasil Spark belum tersedia.", "prediksi": [], "alerts": []}), 200
+        return jsonify({"error": "Hasil Spark belum tersedia. Jalankan spark/analysis.py."}), 503
     return jsonify(spark)
-
-
-@app.route("/api/timeseries")
-def api_timeseries():
-    """Kumpulkan semua file timeseries_*.json dan return sebagai dict {slug: [...]}.
-    Dipakai dashboard untuk line chart historis 30 hari + prediksi ke depan.
-    """
-    result: dict = {}
-    for ts_file in DATA_DIR.glob("timeseries_*.json"):
-        slug = ts_file.stem.replace("timeseries_", "")
-        data = []
-        try:
-            with open(ts_file, encoding="utf-8") as f:
-                raw = json.load(f)
-                data = raw if isinstance(raw, list) else []
-        except Exception:
-            pass
-        result[slug] = data
-    return jsonify(result)
 
 
 @app.route("/api/rekomendasi")
 def api_rekomendasi():
     """
-    Endpoint rekomendasi intervensi dari LLM.
-    Query param: ?refresh=1  → paksa generate ulang meski cache belum expired.
+    Endpoint LLM — generate rekomendasi intervensi kebijakan pangan.
+    Cache 30 menit. Fallback otomatis: Claude → Gemini → rule-based.
     """
-    from flask import request as freq
-    force = freq.args.get("refresh", "0") == "1"
-    try:
-        result = _get_rekomendasi(force_refresh=force)
+    now    = time.time()
+    cached = _rekomendasi_cache
+    if (cached["data"] and cached["updated_at"] and
+            (now - cached["updated_at"]) < REKOMENDASI_TTL):
+        result = cached["data"].copy()
+        result["cached"] = True
         return jsonify(result)
-    except Exception as e:
-        log.error(f"api_rekomendasi error: {e}")
-        return jsonify({"error": str(e)}), 500
+
+    result = _generate_rekomendasi()
+    _rekomendasi_cache["data"]       = result
+    _rekomendasi_cache["updated_at"] = now
+    result["cached"] = False
+    return jsonify(result)
+
+
+@app.route("/api/timeseries/<slug>")
+def api_timeseries(slug: str):
+    """
+    Data time series 30 hari per komoditas.
+    Slug: nama komoditas lowercase, spasi → underscore, e.g. beras_ir_i
+    """
+    # sanitasi slug
+    slug = "".join(c for c in slug.lower().replace(" ", "_") if c.isalnum() or c == "_")
+    data = _load_json(f"timeseries_{slug}.json")
+    if data is None:
+        return jsonify([])
+    return jsonify(data)
 
 
 @app.route("/api/data")
@@ -427,32 +371,26 @@ def api_data():
     berita_sorted = sorted(berita_data, key=lambda x: x.get("timestamp", ""), reverse=True)[:10]
 
     return jsonify({
-        "timestamp"       : datetime.now().isoformat(),
-        "kurs"            : kurs_data,
-        "harga_pangan"    : harga_data.get("data", {}),
+        "timestamp":        datetime.now().isoformat(),
+        "kurs":             kurs_data,
+        "harga_pangan":     harga_data.get("data", {}),
         "harga_updated_at": harga_data.get("updated_at"),
-        "berita"          : berita_sorted,
-        "spark"           : spark_data,
+        "berita":           berita_sorted,
+        "spark":            spark_data,
     })
 
 
 @app.route("/api/health")
 def api_health():
-    ts_files = list(DATA_DIR.glob("timeseries_*.json"))
     return jsonify({
-        "status"      : "ok",
-        "timestamp"   : datetime.now().isoformat(),
-        "files"       : {f: (DATA_DIR / f).exists() for f in
-                         ["live_summary.json", "live_rss.json", "spark_results.json"]},
-        "timeseries"  : len(ts_files),
-        "llm_cache"   : {
-            "active"  : bool(_rek_cache["text"]),
-            "sumber"  : _rek_cache.get("sumber"),
-            "age_s"   : int(time.time() - _rek_cache["ts"]) if _rek_cache["ts"] else None,
-        },
-        "env"         : {
-            "ANTHROPIC_API_KEY": bool(os.environ.get("ANTHROPIC_API_KEY")),
-            "GEMINI_API_KEY"   : bool(os.environ.get("GEMINI_API_KEY")),
+        "status":    "ok",
+        "timestamp": datetime.now().isoformat(),
+        "files":     {f: (DATA_DIR / f).exists() for f in
+                      ["live_summary.json", "live_rss.json", "spark_results.json"]},
+        "llm": {
+            "claude_key_set":  bool(os.environ.get("ANTHROPIC_API_KEY")),
+            "gemini_key_set":  bool(os.environ.get("GEMINI_API_KEY")),
+            "cache_valid":     bool(_rekomendasi_cache["data"]),
         },
     })
 
@@ -461,7 +399,7 @@ if __name__ == "__main__":
     log.info("=" * 55)
     log.info("  FLASK DASHBOARD — Pangan Big Data Analytics")
     log.info("  http://localhost:5000")
-    log.info(f"  Claude key : {'✓ SET' if os.environ.get('ANTHROPIC_API_KEY') else '✗ kosong'}")
-    log.info(f"  Gemini key : {'✓ SET' if os.environ.get('GEMINI_API_KEY') else '✗ kosong'}")
+    log.info(f"  Claude key : {'✓ SET' if os.environ.get('ANTHROPIC_API_KEY') else '✗ tidak ada'}")
+    log.info(f"  Gemini key : {'✓ SET' if os.environ.get('GEMINI_API_KEY') else '✗ tidak ada'}")
     log.info("=" * 55)
     app.run(host="0.0.0.0", port=5000, debug=False)

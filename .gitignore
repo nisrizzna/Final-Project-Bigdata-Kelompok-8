@@ -22,3 +22,4 @@ dashboard/data/*.json
 
 # Logs
 *.log
+.env

@@ -80,7 +80,7 @@ def load_data(spark: SparkSession):
         rss_file = LOCAL_INPUT / "live_rss.json"
 
         if api_file.exists():
-            df_api = spark.read.json(str(api_file))
+            df_api = spark.read.option("multiLine", "true").json(str(api_file))
         else:
             raise FileNotFoundError("Tidak ada data. Jalankan producer + consumer dulu.")
 
@@ -306,7 +306,7 @@ def analisis_prediksi(df_api, spark):
 
     for ts_file in ts_files:
         try:
-            df_ts = spark.read.json(str(ts_file))
+            df_ts = spark.read.option("multiLine", "true").json(str(ts_file))
         except Exception as e:
             print(f"  [SKIP] {ts_file.name}: gagal load — {e}")
             continue
