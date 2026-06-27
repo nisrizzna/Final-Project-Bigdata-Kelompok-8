@@ -204,7 +204,7 @@
     /* ── Heatmap ── */
     .heatmap-wrap { overflow-x: auto; }
     .heatmap-table { border-collapse: collapse; font-size: 10px; margin: 0 auto; }
-    .heatmap-table th { font-size: 9px; color: var(--muted); padding: 4px 6px; text-align: center; max-width: 60px; overflow: hidden; text-transform: none; letter-spacing: 0; }
+    .heatmap-table th { font-size: 9px; color: var(--muted); padding: 4px 6px; text-align: center; max-width: 80px; white-space: nowrap; overflow: hidden; text-transform: none; letter-spacing: 0; }
     .heatmap-table td { width: 42px; height: 32px; text-align: center; font-size: 10px; border: 1px solid var(--bg); border-radius: 2px; font-weight: 500; transition: opacity .15s; }
     .heatmap-table td:hover { opacity: .8; }
 
@@ -555,7 +555,7 @@ function renderPrediksiHero(list) {
         <div class="pred-card-nama">${d.komoditas}</div>
         ${statusBadge(dominant)}
       </div>
-      <div class="pred-card-harga">Rp${fmt(d.harga_saat_ini)} <span style="font-size:11px;color:var(--muted);font-weight:400;">/kg saat ini</span></div>
+      <div class="pred-card-harga">Rp${fmt(d.harga_saat_ini)} <span style="font-size:11px;color:var(--muted);font-weight:400;" title="Harga referensi terakhir yang dipakai model saat melatih prediksi (snapshot data harian), bisa sedikit berbeda dari harga live di panel atas yang update tiap menit">/kg basis model ⓘ</span></div>
       <div class="pred-horizons">${horizonHTML}</div>
       <div class="pred-eval">Model: ${d.model || '–'} &nbsp;|&nbsp; MAE: ${fmt(d.mae || 0)} &nbsp;|&nbsp; MAPE: ${(d.mape_pct||0).toFixed(1)}%</div>
     </div>`;
@@ -671,6 +671,13 @@ async function loadTrenChart(nama) {
   const ctx = document.getElementById('chart-tren').getContext('2d');
   if (_chartTren) _chartTren.destroy();
 
+  // Dataset prediksi harus punya panjang yang SAMA dengan allLabels (labelsHis.length + labFut.length).
+  // Titik pertama dataset prediksi diisi nilai historis terakhir (bukan null) supaya garis
+  // putus-putus nyambung mulus dari titik akhir garis historis, bukan melompat dari kosong.
+  const predData = labelsHis.map((_, i) =>
+    i === labelsHis.length - 1 && valHis.length > 0 ? valHis[valHis.length - 1] : null
+  ).concat(valFut);
+
   _chartTren = new Chart(ctx, {
     data: {
       labels: allLabels,
@@ -689,9 +696,7 @@ async function loadTrenChart(nama) {
         {
           type: 'line',
           label: 'Prediksi (Rp/kg)',
-          data: [...Array(labelsHis.length).fill(null),
-                 valHis.length > 0 ? valHis[valHis.length - 1] : null,
-                 ...valFut],
+          data: predData,
           borderColor: 'rgba(248,81,73,.85)',
           backgroundColor: 'rgba(248,81,73,.05)',
           borderWidth: 2,
@@ -841,7 +846,14 @@ function renderHeatmap(data) {
     if (a >= 0.2) return v > 0 ? '#4d7c0f' : '#93c5fd';
     return 'rgba(255,255,255,.06)';
   }
-  const sn = n => n.split(' ').slice(-1)[0].substring(0, 8);
+  const SINGKATAN = {
+    'Beras IR I': 'Beras I', 'Beras IR III': 'Beras III',
+    'Bawang Merah': 'Bwg Merah', 'Bawang Putih': 'Bwg Putih',
+    'Cabai Rawit Merah': 'Cabai Rawit', 'Cabai Merah Keriting': 'Cabai Kriting',
+    'Daging Sapi': 'Dg Sapi', 'Daging Ayam': 'Dg Ayam',
+    'Gula Pasir': 'Gula', 'Minyak Goreng': 'Minyak', 'Telur Ayam': 'Telur',
+  };
+  const sn = n => SINGKATAN[n] || (n.length > 10 ? n.substring(0, 9) + '…' : n);
   let html = '<table class="heatmap-table"><tr><th></th>';
   komoditas.forEach(k => { html += `<th title="${k}">${sn(k)}</th>`; });
   html += '</tr>';
