@@ -168,6 +168,8 @@ Inti masalahnya: **belum ada sistem peringatan dini berbasis data yang bisa memp
 Akses: http://localhost:5002
 ```
 
+![Diagram Alur Sistem](Documentation/pipeline-diagram-kelompok8.png)
+
 ---
 
 ## Tech Stack
