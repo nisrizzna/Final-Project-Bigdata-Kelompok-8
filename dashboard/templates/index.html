@@ -272,7 +272,7 @@
   <!-- ══ SECTION 2: Prediksi Hero (BARU) ══ -->
   <div class="card">
     <div class="card-head">
-      <div class="card-title">🤖 Prediksi Harga 7 / 14 / 30 Hari — Spark GBT MLlib</div>
+      <div class="card-title">Prediksi Harga 7 / 14 / 30 Hari</div>
       <span class="card-badge badge-blue">Multi-Horizon</span>
     </div>
     <div class="card-body">
@@ -293,7 +293,7 @@
     <!-- Alert Panel -->
     <div class="card">
       <div class="card-head">
-        <div class="card-title">🚨 Status Peringatan Dini per Komoditas</div>
+        <div class="card-title">Status Peringatan Dini per Komoditas</div>
         <span class="card-badge badge-red" id="jumlah-alert">– Alert</span>
       </div>
       <div class="card-body">
@@ -306,7 +306,7 @@
     <!-- Line Chart Historis + Prediksi -->
     <div class="card">
       <div class="card-head">
-        <div class="card-title">📈 Tren Harga Historis + Garis Prediksi</div>
+        <div class="card-title">Tren Harga Historis + Garis Prediksi</div>
         <span class="card-badge badge-purple">30 Hari</span>
       </div>
       <div class="card-body">
@@ -316,10 +316,10 @@
     </div>
   </div>
 
-  <!-- ══ SECTION 4: Rekomendasi LLM (BARU) ══ -->
+  <!-- ══ SECTION 4: Rekomendasi LLM  ══ -->
   <div class="card">
     <div class="card-head">
-      <div class="card-title">🧠 Rekomendasi Intervensi Kebijakan — AI Analyst</div>
+      <div class="card-title">Rekomendasi Intervensi Kebijakan</div>
       <span class="card-badge badge-purple">LLM Powered</span>
     </div>
     <div class="card-body">
@@ -340,7 +340,7 @@
   <div class="grid-2">
     <div class="card">
       <div class="card-head">
-        <div class="card-title">📊 Korelasi Kurs USD/IDR vs Harga Pangan</div>
+        <div class="card-title">Korelasi Kurs USD/IDR vs Harga Pangan</div>
         <span class="card-badge badge-blue">Spark Analysis</span>
       </div>
       <div class="card-body">
@@ -350,7 +350,7 @@
 
     <div class="card">
       <div class="card-head">
-        <div class="card-title">📊 Indeks Volatilitas Harga per Komoditas</div>
+        <div class="card-title">Indeks Volatilitas Harga per Komoditas</div>
         <span class="card-badge badge-blue">Spark Analysis</span>
       </div>
       <div class="card-body">
@@ -363,7 +363,7 @@
   <div class="grid-2">
     <div class="card">
       <div class="card-head">
-        <div class="card-title">📰 Berita Ekonomi Terbaru</div>
+        <div class="card-title">Berita Ekonomi Terbaru</div>
         <span class="card-badge badge-green">RSS Real-Time</span>
       </div>
       <div class="card-body" id="berita-list">
@@ -373,7 +373,7 @@
 
     <div class="card">
       <div class="card-head">
-        <div class="card-title">🔥 Heatmap Korelasi Antar Komoditas</div>
+        <div class="card-title">Heatmap Korelasi Antar Komoditas</div>
         <span class="card-badge badge-purple">Fitur Unggulan</span>
       </div>
       <div class="card-body">
@@ -387,7 +387,7 @@
   <!-- ══ SECTION 7: Simulasi Subsidi ══ -->
   <div class="card">
     <div class="card-head">
-      <div class="card-title">⚖️ Simulasi Dampak Kebijakan Subsidi 10%</div>
+      <div class="card-title">Simulasi Dampak Kebijakan Subsidi 10%</div>
       <span class="card-badge badge-purple">Fitur Unggulan</span>
     </div>
     <div class="card-body">
@@ -881,16 +881,16 @@ function renderBerita(berita) {
   el.innerHTML = berita.map(b => {
     const sentScore = b.sentiment_score || 0;
     const sentTag   = sentScore > 0
-      ? '<span class="tag-sentiment-pos">😊 Positif</span>'
+      ? '<span class="tag-sentiment-pos">Positif</span>'
       : sentScore < 0
-        ? '<span class="tag-sentiment-neg">😟 Negatif</span>'
+        ? '<span class="tag-sentiment-neg">Negatif</span>'
         : '';
     return `<div class="berita-item">
       <div class="berita-judul"><a href="${b.url}" target="_blank" rel="noopener noreferrer">${b.judul}</a></div>
       <div class="berita-meta">
         <span class="tag-sumber">${b.sumber}</span>
-        ${b.relevan_pangan ? '<span class="tag-relevan">🌾 Pangan</span>' : ''}
-        ${b.relevan_kurs   ? '<span class="tag-kurs">💱 Kurs</span>'   : ''}
+        ${b.relevan_pangan ? '<span class="tag-relevan">Pangan</span>' : ''}
+        ${b.relevan_kurs   ? '<span class="tag-kurs">Kurs</span>'   : ''}
         ${sentTag}
         <span class="tag-sumber">${b.published ? new Date(b.published).toLocaleString('id-ID') : (b.timestamp ? new Date(b.timestamp).toLocaleString('id-ID') : '')}</span>
       </div>
