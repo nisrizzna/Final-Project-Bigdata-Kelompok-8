@@ -266,27 +266,25 @@ Pipeline data kami kembangkan supaya bisa menyediakan fitur historis, sinyal mus
 
 ### Tampilan Dashboard
 
-**Harga pangan terkini dan prediksi multi-horizon (7/14/30 hari) per komoditas:**
+**Harga pangan terkini dan prediksi multi-horizon (7/14/30 hari) per komoditas**
+![Dashboard Harga Terkini dan Prediksi](Documentation/Screenshot%202026-06-29%20224402.png)
 
-![Dashboard Harga Terkini dan Prediksi](Documentation/Screenshot%202026-06-27%20141052.png)
+**Status peringatan dini per komoditas, plus tren harga historis dan garis prediksi**
+![Alert Panel dan Tren Harga](Documentation/Screenshot%202026-06-29%20224419.png)
 
-**Status peringatan dini per komoditas, plus tren harga historis dan garis prediksi:**
+**Rekomendasi intervensi kebijakan (LLM/rule-based) dan analisis korelasi-volatilitas kurs**
+![Rekomendasi LLM dan Analisis Kurs](Documentation/Screenshot%202026-06-29%20224435.png)
 
-![Alert Panel dan Tren Harga](Documentation/Screenshot%202026-06-27%20141106.png)
+**Contoh rekomendasi LLM aktif saat komoditas berstatus WASPADA**
+![Rekomendasi LLM Aktif](Documentation/Screenshot%202026-06-27%20141126.png)
 
-**Rekomendasi intervensi kebijakan (LLM/rule-based) dan analisis korelasi-volatilitas kurs:**
+**Berita ekonomi real-time dan heatmap korelasi antar komoditas**
+![Berita dan Heatmap Korelasi](Documentation/Screenshot%202026-06-29%20224503.png)
 
-![Rekomendasi LLM dan Analisis Kurs](Documentation/Screenshot%202026-06-27%20141126.png)
+**Simulasi dampak kebijakan subsidi 10% terhadap anggaran dan inflasi**
+![Simulasi Subsidi](Documentation/Screenshot%202026-06-29%20224521.png)
 
-**Berita ekonomi real-time dan heatmap korelasi antar komoditas:**
-
-![Berita dan Heatmap Korelasi](Documentation/Screenshot%202026-06-27%20141139.png)
-
-**Simulasi dampak kebijakan subsidi 10% terhadap anggaran dan inflasi:**
-
-![Simulasi Subsidi](Documentation/Screenshot%202026-06-27%20141149.png)
-
-**Infrastruktur, Spark Master dengan job yang sudah tereksekusi dan HDFS dengan DataNode aktif serta NameNode overview:**
+**Infrastruktur, Spark Master dengan job yang sudah tereksekusi dan HDFS dengan DataNode aktif serta NameNode overview**
 
 ![Spark Master UI](Documentation/Screenshot%202026-06-27%20141203.png)
 ![HDFS DataNode](Documentation/Screenshot%202026-06-27%20141229.png)
